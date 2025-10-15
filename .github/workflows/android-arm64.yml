@@ -25,13 +25,15 @@ jobs:
 
       - name: Install Android NDK
         id: setup-ndk
-        uses: android-actions/setup-android-ndk@v3
+        uses: nttld/setup-ndk@v1
         with:
-          ndk-version: 26.1.10909125
+          ndk-version: r26d
+          add-to-path: false
 
       - name: Configure Android toolchain env
         run: |
-          TOOLCHAIN_DIR="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          TOOLCHAIN_DIR="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
           echo "AR_aarch64_linux_android=${TOOLCHAIN_DIR}/llvm-ar" >> "$GITHUB_ENV"
           echo "CC_aarch64_linux_android=${TOOLCHAIN_DIR}/aarch64-linux-android${ANDROID_API_LEVEL}-clang" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${TOOLCHAIN_DIR}/aarch64-linux-android${ANDROID_API_LEVEL}-clang" >> "$GITHUB_ENV"
