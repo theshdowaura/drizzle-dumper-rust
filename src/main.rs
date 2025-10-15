@@ -147,7 +147,7 @@ fn find_clone_thread(pid: i32) -> Result<Option<i32>> {
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or_default();
         if tid > 0 {
-            max_tid = Some(max_tid.map_of(tid, |current| current.max(tid)));
+            max_tid = Some(max_tid.map_or(tid, |current| current.max(tid)));
         }
     }
 
