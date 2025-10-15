@@ -9,7 +9,7 @@ use anyhow::{anyhow, Context, Result};
 use nix::sys::ptrace;
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::{getuid, Pid};
-use procfs::process::{all_processes, Process};
+use procfs::process::{all_processes, MMPermissions, Process};
 
 const STATIC_SAFE_LOCATION: &str = "/data/local/tmp/";
 const SUFFIX: &str = "_dumped_";
@@ -164,7 +164,7 @@ fn try_dump_dex(package_name: &str, tid: i32) -> Result<Option<PathBuf>> {
     let maps = process.maps().with_context(|| format!("parsing /proc/{tid}/maps"))?;
 
     for map in maps {
-        if !map.perms.contains('r') {
+        if !map.perms.contains(MMPermissions::READ) {
             continue;
         }
 
