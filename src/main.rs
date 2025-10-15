@@ -6,6 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use nix::libc::{EFAULT, EIO, EPERM};
 use nix::sys::ptrace;
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::{getuid, Pid};
@@ -146,7 +147,7 @@ fn find_clone_thread(pid: i32) -> Result<Option<i32>> {
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or_default();
         if tid > 0 {
-            max_tid = Some(max_tid.map_or(tid, |current| current.max(tid)));
+            max_tid = Some(max_tid.map_of(tid, |current| current.max(tid)));
         }
     }
 
@@ -213,7 +214,7 @@ fn read_dex_from(mem: &mut File, base: u64, available: u64) -> Result<Option<Vec
         .with_context(|| format!("seek to 0x{base:x}"))?;
 
     if let Err(err) = mem.read_exact(&mut header) {
-        if err.kind() == io::ErrorKind::UnexpectedEof {
+        if err.kind() == io::ErrorKind::UnexpectedEof || should_skip_io_error(&err) {
             return Ok(None);
         } else {
             return Err(err).context("read dex header");
@@ -232,8 +233,13 @@ fn read_dex_from(mem: &mut File, base: u64, available: u64) -> Result<Option<Vec
     let mut buffer = vec![0u8; file_size as usize];
     mem.seek(SeekFrom::Start(base))
         .with_context(|| format!("seek to 0x{base:x} for full dump"))?;
-    mem.read_exact(&mut buffer)
-        .context("read full dex from memory")?;
+    if let Err(err) = mem.read_exact(&mut buffer) {
+        if err.kind() == io::ErrorKind::UnexpectedEof || should_skip_io_error(&err) {
+            return Ok(None);
+        } else {
+            return Err(err).context("read full dex from memory");
+        }
+    }
     Ok(Some(buffer))
 }
 
@@ -288,5 +294,12 @@ impl PtracedGuard {
 impl Drop for PtracedGuard {
     fn drop(&mut self) {
         self.detach();
+    }
+}
+
+fn should_skip_io_error(err: &io::Error) -> bool {
+    match err.raw_os_error() {
+        Some(code) if code == EIO || code == EFAULT || code == EPERM => true,
+        _ => false,
     }
 }
