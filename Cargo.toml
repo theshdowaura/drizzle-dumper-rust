@@ -5,5 +5,5 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-nix = { version = "0.28", default-features = false, features = ["ptrace", "process"] }
+nix = { version = "0.28", default-features = false, features = ["ptrace", "process", "user"] }
 procfs = "0.15"
