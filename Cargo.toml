@@ -1,0 +1,9 @@
+[package]
+name = "drizzle_dumper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+nix = { version = "0.28", default-features = false, features = ["ptrace", "process"] }
+procfs = "0.15"
