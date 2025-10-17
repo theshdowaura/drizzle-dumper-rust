@@ -28,6 +28,7 @@ struct Config {
     scan_step: u64,
     min_region: u64,
     max_region: u64,
+    min_dump_size: u64,
 }
 
 fn main() -> Result<()> {
@@ -119,6 +120,7 @@ fn print_usage() {
          [*]    --scan-step <bytes>      Scan granularity per region (default 4096)\n\
          [*]    --min-size <bytes>       Minimum region size (default 10KiB)\n\
          [*]    --max-size <bytes>       Maximum region size (default 600MiB)\n\
+         [*]    --min-dump-size <bytes>  Minimum bytes to dump per hit (default 4096, fallback to region if smaller)\n\
          [*]  Example:\n\
          [*]    ./drizzleDumper com.foo.bar 0.5 --dump-all --fix-header --out /sdcard/dumps\n\
          [*]  If success, you can find the dex file in the output directory.\n\
@@ -140,6 +142,7 @@ fn parse_config(args: &[String]) -> Result<Config> {
         scan_step: 4096,
         min_region: DEFAULT_MIN_REGION_SIZE,
         max_region: DEFAULT_MAX_REGION_SIZE,
+        min_dump_size: 4096,
     };
     let mut i = 2;
     while i < args.len() {
@@ -160,56 +163,16 @@ fn parse_config(args: &[String]) -> Result<Config> {
         } else if a == "--max-size" && i + 1 < args.len() {
             cfg.max_region = args[i + 1].parse::<u64>().unwrap_or(DEFAULT_MAX_REGION_SIZE);
             i += 1;
+        } else if a == "--min-dump-size" && i + 1 < args.len() {
+            cfg.min_dump_size = args[i + 1]
+                .parse::<u64>()
+                .unwrap_or(4096)
+                .max(0x70);
+            i += 1;
         }
         i += 1;
     }
     Ok(cfg)
-}
-
-fn find_process_pid(package_name: &str) -> Result<Option<i32>> {
-    for proc_entry in all_processes().context("iterating over /proc")? {
-        let process = match proc_entry {
-            Ok(proc) => proc,
-            Err(_) => continue,
-        };
-
-        let proc_pid = process.pid;
-        if proc_pid == std::process::id() as i32 {
-            continue;
-        }
-
-        if let Ok(cmdline) = process.cmdline() {
-            if let Some(first) = cmdline.first() {
-                if first == package_name {
-                    return Ok(Some(proc_pid));
-                }
-            }
-        }
-    }
-    Ok(None)
-}
-
-fn find_clone_thread(pid: i32) -> Result<Option<i32>> {
-    let mut max_tid: Option<i32> = None;
-    let task_dir = format!("/proc/{pid}/task");
-
-    for entry in fs::read_dir(&task_dir)
-        .with_context(|| format!("opening thread dir {task_dir}"))?
-    {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let name = entry.file_name();
-        let tid = name
-            .to_str()
-            .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or_default();
-        if tid > 0 {
-            max_tid = Some(max_tid.map_or(tid, |current| current.max(tid)));
-        }
-    }
-    Ok(max_tid)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,7 +183,7 @@ enum MagicKind {
 
 struct DumpHit {
     base: u64,
-    size: u64,
+    reported_size: Option<u64>,
     kind: MagicKind,
     buffer: Vec<u8>,
 }
@@ -265,14 +228,23 @@ fn try_dump_dex(package_name: &str, tid: i32, cfg: &Config) -> Result<Vec<PathBu
             || path_hint.contains("dalvik")
             || path_hint.contains("apk");
 
-        if let Ok(hits) = scan_region_for_magic(&mut mem, region_start, region_len, cfg.scan_step, prefer) {
+        if let Ok(hits) = scan_region_for_magic(
+            &mut mem,
+            region_start,
+            region_len,
+            cfg,
+            prefer,
+        ) {
             for mut hit in hits {
                 if seen_bases.contains(&hit.base) {
                     continue;
                 }
                 seen_bases.insert(hit.base);
 
-                if cfg.fix_header && hit.kind == MagicKind::Dex {
+                if cfg.fix_header
+                    && hit.kind == MagicKind::Dex
+                    && hit.reported_size == Some(hit.buffer.len() as u64)
+                {
                     fix_dex_header_inplace(&mut hit.buffer);
                 }
 
@@ -287,10 +259,11 @@ fn try_dump_dex(package_name: &str, tid: i32, cfg: &Config) -> Result<Vec<PathBu
                     &cfg.out_dir,
                     tid,
                     hit.base,
-                    hit.size,
+                    hit.buffer.len() as u64,
                     hit.kind,
                     &output_path,
                     &path_hint,
+                    hit.reported_size,
                 )?;
                 dumped_paths.push(output_path);
 
@@ -310,14 +283,14 @@ fn scan_region_for_magic(
     mem: &mut File,
     start: u64,
     region_len: u64,
-    step: u64,
+    cfg: &Config,
     _prefer: bool,
 ) -> Result<Vec<DumpHit>> {
     let region_end = start + region_len;
     let mut hits = Vec::<DumpHit>::new();
 
     for off in [0u64, 8u64] {
-        if let Some(hit) = try_read_at(mem, start + off, region_end - (start + off))? {
+        if let Some(hit) = try_read_at(mem, start + off, region_end - (start + off), cfg)? {
             hits.push(hit);
         }
     }
@@ -329,14 +302,16 @@ fn scan_region_for_magic(
         let read_len = std::cmp::min(CHUNK as u64, region_end - pos) as usize;
         mem.seek(SeekFrom::Start(pos)).ok();
         if mem.read_exact(&mut buf[..read_len]).is_err() {
-            pos = pos.saturating_add(step.max(1));
+            pos = pos.saturating_add(cfg.scan_step.max(1));
             continue;
         }
         let window = &buf[..read_len];
         let mut i = 0usize;
         while i + 8 <= window.len() {
             if &window[i..i + 4] == b"dex\n" || &window[i..i + 4] == b"cdex" {
-                if let Some(hit) = try_read_at(mem, pos + i as u64, region_end - (pos + i as u64))? {
+                if let Some(hit) =
+                    try_read_at(mem, pos + i as u64, region_end - (pos + i as u64), cfg)?
+                {
                     hits.push(hit);
                 }
                 i += 16;
@@ -344,12 +319,12 @@ fn scan_region_for_magic(
             }
             i += 1;
         }
-        pos = pos.saturating_add(step.max(1));
+        pos = pos.saturating_add(cfg.scan_step.max(1));
     }
     Ok(hits)
 }
 
-fn try_read_at(mem: &mut File, base: u64, available: u64) -> Result<Option<DumpHit>> {
+fn try_read_at(mem: &mut File, base: u64, available: u64, cfg: &Config) -> Result<Option<DumpHit>> {
     if available < 0x40 {
         return Ok(None);
     }
@@ -370,20 +345,27 @@ fn try_read_at(mem: &mut File, base: u64, available: u64) -> Result<Option<DumpH
         None => return Ok(None),
     };
 
-    let mut file_size = read_u32_le(&header, 0x20) as u64;
-    if file_size == 0 || file_size > available {
+    let mut header_size = read_u32_le(&header, 0x20) as u64;
+    if header_size == 0 || header_size > available {
         for off in [0x24usize, 0x28usize] {
-            file_size = read_u32_le(&header, off) as u64;
-            if file_size > 0 && file_size <= available {
+            header_size = read_u32_le(&header, off) as u64;
+            if header_size > 0 && header_size <= available {
                 break;
             }
         }
     }
-    if file_size == 0 || file_size > available {
-        return Ok(None);
+    let header_opt = if header_size > 0 && header_size <= available {
+        Some(header_size)
+    } else {
+        None
+    };
+
+    let mut read_len = header_opt.unwrap_or(available);
+    if read_len < cfg.min_dump_size {
+        read_len = available;
     }
 
-    let mut buffer = vec![0u8; file_size as usize];
+    let mut buffer = vec![0u8; read_len as usize];
     if mem.seek(SeekFrom::Start(base)).is_err() {
         return Ok(None);
     }
@@ -397,7 +379,7 @@ fn try_read_at(mem: &mut File, base: u64, available: u64) -> Result<Option<DumpH
 
     Ok(Some(DumpHit {
         base,
-        size: file_size,
+        reported_size: header_opt,
         kind,
         buffer,
     }))
@@ -455,6 +437,7 @@ fn append_manifest(
     kind: MagicKind,
     out_path: &PathBuf,
     map_path_hint: &str,
+    reported_size: Option<u64>,
 ) -> Result<()> {
     let manifest = out_dir.join("dump_manifest.csv");
     let mut f = OpenOptions::new().create(true).append(true).open(&manifest)?;
@@ -462,40 +445,17 @@ fn append_manifest(
         MagicKind::Dex => "DEX",
         MagicKind::Cdex => "CDEX",
     };
+    let reported_col = reported_size
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "-".to_string());
     writeln!(
         f,
-        "{tid},{base:#x},{size},{kind_s},\"{}\",\"{}\"",
+        "{tid},{base:#x},{size},{kind_s},{},\"{}\",\"{}\"",
+        reported_col,
         out_path.display(),
-        map_path_hint.replace('"', "'"),
+        map_path_hint.replace('"', "'")
     )?;
     Ok(())
-}
-
-struct PtracedGuard {
-    pid: Pid,
-    attached: bool,
-}
-
-impl PtracedGuard {
-    fn attach(pid: Pid) -> Result<Self> {
-        ptrace::attach(pid).with_context(|| format!("ptrace attach {}", pid))?;
-        match waitpid(pid, None)? {
-            WaitStatus::Stopped(_, _) => Ok(Self { pid, attached: true }),
-            other => Err(anyhow!("unexpected wait status: {other:?}")),
-        }
-    }
-    fn detach(&mut self) {
-        if self.attached {
-            let _ = ptrace::detach(self.pid, None);
-            self.attached = false;
-        }
-    }
-}
-
-impl Drop for PtracedGuard {
-    fn drop(&mut self) {
-        self.detach();
-    }
 }
 
 fn should_skip_io_error(err: &io::Error) -> bool {
