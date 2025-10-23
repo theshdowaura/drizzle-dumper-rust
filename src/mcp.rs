@@ -27,10 +27,7 @@ use mcp_protocol_sdk::{
         RequestId, ToolResult,
     },
     server::McpServer,
-<<<<<<< HEAD
-=======
     transport::http::HttpClientTransport,
->>>>>>> f55a884 (Add remote MCP client support to CLI)
 };
 use nix::unistd::getuid;
 use serde_json::{json, Value};
@@ -84,78 +81,6 @@ async fn run_async(bind: String) -> Result<()> {
         "drizzle-dumper".to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
     )));
-<<<<<<< HEAD
-
-    {
-        let guard = server.lock().await;
-        guard
-            .add_tool(
-                "dump_dex".to_string(),
-                Some("Dump DEX/CDEX regions for a running package".to_string()),
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "package": {"type": "string"},
-                        "wait_time": {"type": "number"},
-                        "out_dir": {"type": "string"},
-                        "dump_all": {"type": "boolean"},
-                        "fix_header": {"type": "boolean"},
-                        "scan_step": {"type": "integer", "minimum": 1},
-                        "min_size": {"type": "integer", "minimum": 1},
-                        "max_size": {"type": "integer", "minimum": 1},
-                        "min_dump_size": {"type": "integer", "minimum": 1},
-                        "signal_trigger": {"type": "boolean"},
-                        "watch_maps": {"type": "boolean"},
-                        "stage_threshold": {"type": "integer", "minimum": 1},
-                        "map_patterns": {
-                            "oneOf": [
-                                {"type": "string"},
-                                {"type": "array", "items": {"type": "string"}}
-                            ]
-                        }
-                    },
-                    "required": ["package"],
-                }),
-                DumpTool::default(),
-            )
-            .await
-            .context("register dump_dex tool")?;
-    }
-
-    let (notifier, _) = broadcast::channel(256);
-    let state = AppState {
-        server: server.clone(),
-        notifier,
-    };
-
-    let app = build_router(state);
-
-    let listener = tokio::net::TcpListener::bind(&bind)
-        .await
-        .with_context(|| format!("bind HTTP server to {bind}"))?;
-    let addr: SocketAddr = listener.local_addr().context("resolve bound address")?;
-
-    println!("[MCP]  drizzleDumper MCP server listening on http://{addr}");
-    println!("[MCP]  Endpoints: POST /mcp, POST /mcp/notify, GET /mcp/events (SSE)");
-    println!("[MCP]  Press Ctrl+C to stop the server.");
-
-    let server_task = tokio::spawn(async move {
-        if let Err(err) = axum::serve(listener, app).await {
-            eprintln!("[MCP]  HTTP server error: {err}");
-        }
-    });
-
-    tokio_signal::ctrl_c().await.context("wait for Ctrl+C")?;
-    server_task.abort();
-    if let Err(err) = server_task.await {
-        if !err.is_cancelled() {
-            eprintln!("[MCP]  HTTP server task ended unexpectedly: {err}");
-        }
-    }
-
-    Ok(())
-=======
-
     {
         let guard = server.lock().await;
         guard
@@ -305,138 +230,6 @@ fn config_to_tool_arguments(package: &str, cfg: &Config) -> HashMap<String, Valu
         map.insert("map_patterns".to_string(), json!(cfg.map_patterns));
     }
     map
-}
-
-async fn handle_mcp_request(
-    State(state): State<AppState>,
-    body: Bytes,
-) -> Result<Json<JsonRpcMessage>, (StatusCode, Json<JsonRpcMessage>)> {
-    if body_is_blank(body.as_ref()) {
-        return Err(json_rpc_error(
-            StatusCode::BAD_REQUEST,
-            serde_json::Value::Null,
-            error_codes::PARSE_ERROR,
-            "Request body is empty",
-        ));
-    }
-
-    let request: JsonRpcRequest = serde_json::from_slice(&body).map_err(|err| {
-        json_rpc_error(
-            StatusCode::BAD_REQUEST,
-            serde_json::Value::Null,
-            error_codes::PARSE_ERROR,
-            format!("Failed to parse JSON request body: {err}"),
-        )
-    })?;
-    let request_id = request.id.clone();
-
-    let result = {
-        let guard = state.server.lock().await;
-        guard.handle_request(request).await
-    };
-
-    match result {
-        Ok(response) => Ok(Json(JsonRpcMessage::Response(response))),
-        Err(err) => {
-            let (code, message) = map_mcp_error(&err);
-            Err(json_rpc_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                request_id,
-                code,
-                message,
-            ))
-        }
-    }
-}
-
-async fn handle_notification(
-    State(state): State<AppState>,
-    body: Bytes,
-) -> Result<StatusCode, (StatusCode, Json<JsonRpcMessage>)> {
-    if body_is_blank(body.as_ref()) {
-        return Ok(StatusCode::NO_CONTENT);
-    }
-
-    let notification: JsonRpcNotification = serde_json::from_slice(&body).map_err(|err| {
-        json_rpc_error(
-            StatusCode::BAD_REQUEST,
-            serde_json::Value::Null,
-            error_codes::PARSE_ERROR,
-            format!("Failed to parse JSON notification body: {err}"),
-        )
-    })?;
-
-    // Broadcast to SSE listeners; ignore if nobody is listening.
-    let _ = state.notifier.send(notification);
-
-    Ok(StatusCode::OK)
-}
-
-async fn handle_sse_events(
-    State(state): State<AppState>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
-    let receiver = state.notifier.subscribe();
-    let stream = BroadcastStream::new(receiver).filter_map(|msg| async move {
-        match msg {
-            Ok(notification) => match serde_json::to_string(&notification) {
-                Ok(json) => Some(Ok(Event::default().data(json))),
-                Err(err) => {
-                    tracing::error!("Failed to serialize notification: {err}");
-                    None
-                }
-            },
-            Err(_) => None,
-        }
-    });
-
-    Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(30))
-            .text("keep-alive"),
-    )
-}
-
-async fn handle_options() -> StatusCode {
-    StatusCode::NO_CONTENT
-}
-
-async fn handle_health() -> Json<Value> {
-    let timestamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default();
-    Json(json!({
-        "status": "ok",
-        "timestamp": timestamp,
-    }))
-}
-
-fn body_is_blank(body: &[u8]) -> bool {
-    body.iter().all(|byte| byte.is_ascii_whitespace())
-}
-
-fn json_rpc_error(
-    status: StatusCode,
-    id: RequestId,
-    code: i32,
-    message: impl Into<String>,
-) -> (StatusCode, Json<JsonRpcMessage>) {
-    let error = JsonRpcError::error(id, code, message.into(), None);
-    (status, Json(JsonRpcMessage::Error(error)))
-}
-
-fn map_mcp_error(err: &McpError) -> (i32, String) {
-    let message = err.to_string();
-    let code = match err {
-        McpError::Validation(_) => error_codes::INVALID_PARAMS,
-        McpError::Protocol(_) => error_codes::INVALID_REQUEST,
-        McpError::ToolNotFound(_) => error_codes::TOOL_NOT_FOUND,
-        McpError::ResourceNotFound(_) => error_codes::RESOURCE_NOT_FOUND,
-        McpError::PromptNotFound(_) => error_codes::PROMPT_NOT_FOUND,
-        _ => error_codes::INTERNAL_ERROR,
-    };
-    (code, message)
->>>>>>> f55a884 (Add remote MCP client support to CLI)
 }
 
 async fn handle_mcp_request(
@@ -720,14 +513,10 @@ mod tests {
         body::{self, Body},
         http::{header::CONTENT_TYPE, Method, Request},
     };
-<<<<<<< HEAD
-    use serde_json::Value as JsonValue;
-=======
     use crate::config::Config;
     use serde_json::{json, Value as JsonValue};
     use std::io::ErrorKind;
     use std::path::PathBuf;
->>>>>>> f55a884 (Add remote MCP client support to CLI)
     use tokio::sync::{broadcast, Mutex};
     use tower::ServiceExt;
 
@@ -795,8 +584,6 @@ mod tests {
             .unwrap()
             .contains("Failed to parse JSON"));
     }
-<<<<<<< HEAD
-=======
 
     #[tokio::test]
     async fn remote_call_invokes_dump_tool() {
@@ -925,5 +712,4 @@ mod tests {
             })
         }
     }
->>>>>>> f55a884 (Add remote MCP client support to CLI)
 }
