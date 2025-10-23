@@ -43,53 +43,86 @@ impl Default for Config {
 }
 
 pub fn parse_config(args: &[String]) -> Result<Config> {
-    let wait_time = if args.len() >= 3 && !args[2].starts_with("--") {
-        args[2].parse::<f64>().unwrap_or(0.0)
-    } else {
-        0.0
-    };
+    parse_config_from_index(args, 1)
+}
 
+/// Parse configuration options from command-line arguments where the package name
+/// resides at `package_index`.
+pub fn parse_config_from_index(args: &[String], package_index: usize) -> Result<Config> {
     let mut cfg = Config::default();
-    cfg.wait_time = wait_time;
 
-    let mut i = 2;
+    let mut i = package_index + 1;
+    if let Some(arg) = args.get(i) {
+        if !arg.starts_with("--") {
+            cfg.wait_time = arg.parse::<f64>().unwrap_or(0.0);
+            i += 1;
+        }
+    }
+
     while i < args.len() {
         let a = &args[i];
-        if a == "--dump-all" {
-            cfg.dump_all = true;
-        } else if a == "--fix-header" {
-            cfg.fix_header = true;
-        } else if a == "--out" && i + 1 < args.len() {
-            cfg.out_dir = PathBuf::from(&args[i + 1]);
-            i += 1;
-        } else if a == "--scan-step" && i + 1 < args.len() {
-            cfg.scan_step = args[i + 1].parse::<u64>().unwrap_or(4096);
-            i += 1;
-        } else if a == "--min-size" && i + 1 < args.len() {
-            cfg.min_region = args[i + 1]
-                .parse::<u64>()
-                .unwrap_or(DEFAULT_MIN_REGION_SIZE);
-            i += 1;
-        } else if a == "--max-size" && i + 1 < args.len() {
-            cfg.max_region = args[i + 1]
-                .parse::<u64>()
-                .unwrap_or(DEFAULT_MAX_REGION_SIZE);
-            i += 1;
-        } else if a == "--min-dump-size" && i + 1 < args.len() {
-            cfg.min_dump_size = args[i + 1].parse::<u64>().unwrap_or(4096).max(0x70);
-            i += 1;
-        } else if a == "--signal-trigger" {
-            cfg.signal_trigger = true;
-        } else if a == "--watch-maps" {
-            cfg.watch_maps = true;
-        } else if a == "--stage-threshold" && i + 1 < args.len() {
-            cfg.stage_threshold = args[i + 1].parse::<usize>().ok();
-            cfg.watch_maps = true;
-            i += 1;
-        } else if a == "--map-pattern" && i + 1 < args.len() {
-            cfg.watch_maps = true;
-            cfg.map_patterns.push(args[i + 1].to_ascii_lowercase());
-            i += 1;
+        match a.as_str() {
+            "--dump-all" => {
+                cfg.dump_all = true;
+            }
+            "--fix-header" => {
+                cfg.fix_header = true;
+            }
+            "--out" => {
+                if let Some(value) = args.get(i + 1) {
+                    cfg.out_dir = PathBuf::from(value);
+                    i += 1;
+                }
+            }
+            "--scan-step" => {
+                if let Some(value) = args.get(i + 1) {
+                    cfg.scan_step = value.parse::<u64>().unwrap_or(4096);
+                    i += 1;
+                }
+            }
+            "--min-size" => {
+                if let Some(value) = args.get(i + 1) {
+                    cfg.min_region = value
+                        .parse::<u64>()
+                        .unwrap_or(DEFAULT_MIN_REGION_SIZE);
+                    i += 1;
+                }
+            }
+            "--max-size" => {
+                if let Some(value) = args.get(i + 1) {
+                    cfg.max_region = value
+                        .parse::<u64>()
+                        .unwrap_or(DEFAULT_MAX_REGION_SIZE);
+                    i += 1;
+                }
+            }
+            "--min-dump-size" => {
+                if let Some(value) = args.get(i + 1) {
+                    cfg.min_dump_size = value.parse::<u64>().unwrap_or(4096).max(0x70);
+                    i += 1;
+                }
+            }
+            "--signal-trigger" => {
+                cfg.signal_trigger = true;
+            }
+            "--watch-maps" => {
+                cfg.watch_maps = true;
+            }
+            "--stage-threshold" => {
+                if let Some(value) = args.get(i + 1) {
+                    cfg.stage_threshold = value.parse::<usize>().ok();
+                    cfg.watch_maps = true;
+                    i += 1;
+                }
+            }
+            "--map-pattern" => {
+                if let Some(value) = args.get(i + 1) {
+                    cfg.watch_maps = true;
+                    cfg.map_patterns.push(value.to_ascii_lowercase());
+                    i += 1;
+                }
+            }
+            _ => {}
         }
         i += 1;
     }
@@ -100,6 +133,7 @@ pub fn parse_config(args: &[String]) -> Result<Config> {
 pub fn print_usage() {
     println!(
         "[*]  Usage :\n\
+         [*]    ./drizzleDumper --mcp-call <base_url> <package_name> [wait_time(s)] [options]\n\
          [*]    ./drizzleDumper --mcp-server [bind_addr]\n\
          [*]    ./drizzleDumper <package_name> [wait_times(s)] [options]\n\
          [*]  Options:\n\
@@ -119,4 +153,81 @@ pub fn print_usage() {
          [*]  If success, you can find the dex file in the output directory.\n\
          [*]  Good Luck!"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_config_with_offset_matches_base() {
+        let base_args = build_args(&[
+            "bin",
+            "com.example.app",
+            "1.0",
+            "--dump-all",
+            "--fix-header",
+            "--out",
+            "/tmp/out",
+            "--scan-step",
+            "2048",
+            "--min-size",
+            "8192",
+            "--max-size",
+            "65536",
+            "--min-dump-size",
+            "512",
+            "--signal-trigger",
+            "--watch-maps",
+            "--stage-threshold",
+            "3",
+            "--map-pattern",
+            "classes.dex",
+        ]);
+        let expected = parse_config(&base_args).unwrap();
+
+        let remote_args = build_args(&[
+            "bin",
+            "--mcp-call",
+            "http://localhost:45831",
+            "com.example.app",
+            "1.0",
+            "--dump-all",
+            "--fix-header",
+            "--out",
+            "/tmp/out",
+            "--scan-step",
+            "2048",
+            "--min-size",
+            "8192",
+            "--max-size",
+            "65536",
+            "--min-dump-size",
+            "512",
+            "--signal-trigger",
+            "--watch-maps",
+            "--stage-threshold",
+            "3",
+            "--map-pattern",
+            "classes.dex",
+        ]);
+        let remote = parse_config_from_index(&remote_args, 3).unwrap();
+
+        assert_eq!(remote.wait_time, expected.wait_time);
+        assert_eq!(remote.dump_all, expected.dump_all);
+        assert_eq!(remote.fix_header, expected.fix_header);
+        assert_eq!(remote.out_dir, expected.out_dir);
+        assert_eq!(remote.scan_step, expected.scan_step);
+        assert_eq!(remote.min_region, expected.min_region);
+        assert_eq!(remote.max_region, expected.max_region);
+        assert_eq!(remote.min_dump_size, expected.min_dump_size);
+        assert_eq!(remote.signal_trigger, expected.signal_trigger);
+        assert_eq!(remote.watch_maps, expected.watch_maps);
+        assert_eq!(remote.stage_threshold, expected.stage_threshold);
+        assert_eq!(remote.map_patterns, expected.map_patterns);
+    }
 }
