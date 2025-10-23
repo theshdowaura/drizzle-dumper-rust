@@ -52,8 +52,7 @@ pub(super) fn scan_region(
         let mut idx = 0usize;
         while idx + 8 <= window.len() {
             if &window[idx..idx + 4] == b"dex\n" || &window[idx..idx + 4] == b"cdex" {
-                if let Some(hit) = try_read(mem, pos + idx as u64, end - (pos + idx as u64), cfg)?
-                {
+                if let Some(hit) = try_read(mem, pos + idx as u64, end - (pos + idx as u64), cfg)? {
                     hits.push(hit);
                 }
                 idx += 16;
