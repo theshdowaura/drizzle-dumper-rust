@@ -439,7 +439,7 @@ mod tests {
         let server = Arc::new(Mutex::new(McpServer::new(
             "test-server".to_string(),
             "0.0.1".to_string(),
-        )))
+        )));
         let (notifier, _) = broadcast::channel(8);
         build_router(AppState { server, notifier })
     }
