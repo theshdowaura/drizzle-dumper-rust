@@ -1,5 +1,6 @@
 pub mod config;
 pub mod mcp;
+#[path = "ptrace/mod.rs"]
 pub mod ptrace;
 pub mod signals;
 pub mod workflow;
