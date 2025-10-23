@@ -11,7 +11,7 @@ procfs = { version = "0.16", default-features = false }
 sha1 = "0.10"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
-mcp-protocol-sdk = { version = "0.5", features = ["websocket"] }
+mcp-protocol-sdk = { version = "0.5", features = ["http"] }
 
 [profile.release]
 opt-level = "z"

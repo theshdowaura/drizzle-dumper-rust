@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use mcp_protocol_sdk::{
     core::{error::McpError, tool::ToolHandler},
     protocol::types::{Content, ToolResult},
-    server::McpServer,
-    transport::websocket::WebSocketServerTransport,
+    server::HttpMcpServer,
+    transport::http::HttpServerTransport,
 };
 use nix::unistd::getuid;
 use serde_json::{json, Value};
@@ -31,55 +31,61 @@ async fn run_async(bind: String) -> Result<()> {
         println!("[MCP]  Warning: drizzleDumper server is not running as root; dumps may fail.");
     }
 
-    let mut server = McpServer::new(
+    let mut http_server = HttpMcpServer::new(
         "drizzle-dumper".to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
     );
 
-    server
-        .add_tool(
-            "dump_dex".to_string(),
-            Some("Dump DEX/CDEX regions for a running package".to_string()),
-            json!({
-                "type": "object",
-                "properties": {
-                    "package": {"type": "string"},
-                    "wait_time": {"type": "number"},
-                    "out_dir": {"type": "string"},
-                    "dump_all": {"type": "boolean"},
-                    "fix_header": {"type": "boolean"},
-                    "scan_step": {"type": "integer", "minimum": 1},
-                    "min_size": {"type": "integer", "minimum": 1},
-                    "max_size": {"type": "integer", "minimum": 1},
-                    "min_dump_size": {"type": "integer", "minimum": 1},
-                    "signal_trigger": {"type": "boolean"},
-                    "watch_maps": {"type": "boolean"},
-                    "stage_threshold": {"type": "integer", "minimum": 1},
-                    "map_patterns": {
-                        "oneOf": [
-                            {"type": "string"},
-                            {"type": "array", "items": {"type": "string"}}
-                        ]
-                    }
-                },
-                "required": ["package"],
-            }),
-            DumpTool::default(),
-        )
-        .await
-        .context("register dump_dex tool")?;
+    {
+        let server_handle = http_server.server().await;
+        let server = server_handle.lock().await;
+        server
+            .add_tool(
+                "dump_dex".to_string(),
+                Some("Dump DEX/CDEX regions for a running package".to_string()),
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "package": {"type": "string"},
+                        "wait_time": {"type": "number"},
+                        "out_dir": {"type": "string"},
+                        "dump_all": {"type": "boolean"},
+                        "fix_header": {"type": "boolean"},
+                        "scan_step": {"type": "integer", "minimum": 1},
+                        "min_size": {"type": "integer", "minimum": 1},
+                        "max_size": {"type": "integer", "minimum": 1},
+                        "min_dump_size": {"type": "integer", "minimum": 1},
+                        "signal_trigger": {"type": "boolean"},
+                        "watch_maps": {"type": "boolean"},
+                        "stage_threshold": {"type": "integer", "minimum": 1},
+                        "map_patterns": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}}
+                            ]
+                        }
+                    },
+                    "required": ["package"],
+                }),
+                DumpTool::default(),
+            )
+            .await
+            .context("register dump_dex tool")?;
+    }
 
-    let transport = WebSocketServerTransport::new(bind.as_str());
-    server
+    let transport = HttpServerTransport::new(bind.as_str());
+    http_server
         .start(transport)
         .await
-        .context("start MCP websocket server")?;
+        .context("start MCP HTTP server")?;
 
-    println!("[MCP]  drizzleDumper MCP server listening on ws://{bind}");
+    println!("[MCP]  drizzleDumper MCP server listening on http://{bind}");
+    println!("[MCP]  Endpoints: POST /mcp , POST /mcp/notify , GET /mcp/events (SSE)");
     println!("[MCP]  Press Ctrl+C to stop the server.");
+
     tokio_signal::ctrl_c().await.context("wait for Ctrl+C")?;
 
-    server.stop().await.context("stop MCP server")?;
+    http_server.stop().await.context("stop MCP server")?;
     Ok(())
 }
 
