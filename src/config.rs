@@ -82,17 +82,13 @@ pub fn parse_config_from_index(args: &[String], package_index: usize) -> Result<
             }
             "--min-size" => {
                 if let Some(value) = args.get(i + 1) {
-                    cfg.min_region = value
-                        .parse::<u64>()
-                        .unwrap_or(DEFAULT_MIN_REGION_SIZE);
+                    cfg.min_region = value.parse::<u64>().unwrap_or(DEFAULT_MIN_REGION_SIZE);
                     i += 1;
                 }
             }
             "--max-size" => {
                 if let Some(value) = args.get(i + 1) {
-                    cfg.max_region = value
-                        .parse::<u64>()
-                        .unwrap_or(DEFAULT_MAX_REGION_SIZE);
+                    cfg.max_region = value.parse::<u64>().unwrap_or(DEFAULT_MAX_REGION_SIZE);
                     i += 1;
                 }
             }
@@ -133,7 +129,6 @@ pub fn parse_config_from_index(args: &[String], package_index: usize) -> Result<
 pub fn print_usage() {
     println!(
         "[*]  Usage :\n\
-         [*]    ./drizzleDumper --mcp-call <base_url> <package_name> [wait_time(s)] [options]\n\
          [*]    ./drizzleDumper --mcp-server [bind_addr]\n\
          [*]    ./drizzleDumper <package_name> [wait_times(s)] [options]\n\
          [*]  Options:\n\
@@ -190,10 +185,9 @@ mod tests {
         ]);
         let expected = parse_config(&base_args).unwrap();
 
-        let remote_args = build_args(&[
+        let alt_args = build_args(&[
             "bin",
-            "--mcp-call",
-            "http://localhost:45831",
+            "--placeholder",
             "com.example.app",
             "1.0",
             "--dump-all",
@@ -215,7 +209,7 @@ mod tests {
             "--map-pattern",
             "classes.dex",
         ]);
-        let remote = parse_config_from_index(&remote_args, 3).unwrap();
+        let remote = parse_config_from_index(&alt_args, 2).unwrap();
 
         assert_eq!(remote.wait_time, expected.wait_time);
         assert_eq!(remote.dump_all, expected.dump_all);

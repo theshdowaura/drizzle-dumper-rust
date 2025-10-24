@@ -10,31 +10,30 @@ use std::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::State,
-    http::{Method, StatusCode},
+    http::{header::ACCEPT, HeaderMap, HeaderValue, Method, StatusCode},
     response::sse::{Event, KeepAlive},
-    response::{Json, Sse},
+    response::{IntoResponse, Json, Response, Sse},
     routing::{get, post},
     Router,
 };
 use futures_util::StreamExt;
 use mcp_protocol_sdk::{
-    client::McpClient,
     core::{error::McpError, tool::ToolHandler},
-    protocol::types::{
-        error_codes, Content, JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
-        RequestId, ToolResult,
+    protocol::{
+        methods,
+        types::{error_codes, Content, JsonRpcError, JsonRpcMessage, RequestId, ToolResult},
     },
     server::McpServer,
-    transport::http::HttpClientTransport,
 };
 use nix::unistd::getuid;
+use rand::{distributions::Alphanumeric, Rng};
 use serde_json::{json, Value};
 use tokio::{
     runtime::Builder as TokioRuntimeBuilder,
     signal as tokio_signal,
-    sync::{broadcast, Mutex},
+    sync::{broadcast, Mutex, RwLock},
     task,
 };
 use tokio_stream::wrappers::BroadcastStream;
@@ -46,19 +45,35 @@ use crate::workflow::run_dump_workflow;
 #[derive(Clone)]
 struct AppState {
     server: Arc<Mutex<McpServer>>,
-    notifier: broadcast::Sender<JsonRpcNotification>,
+    sessions: Arc<RwLock<HashMap<String, Arc<SessionHandle>>>>,
+}
+
+struct SessionHandle {
+    sender: broadcast::Sender<JsonRpcMessage>,
+}
+
+impl SessionHandle {
+    fn new() -> Self {
+        let (sender, _) = broadcast::channel(256);
+        Self { sender }
+    }
 }
 
 fn build_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::POST, Method::GET, Method::OPTIONS])
+        .allow_methods([Method::POST, Method::GET, Method::DELETE, Method::OPTIONS])
         .allow_headers(Any);
 
     Router::new()
-        .route("/mcp", post(handle_mcp_request).options(handle_options))
-        .route("/mcp/notify", post(handle_notification))
-        .route("/mcp/events", get(handle_sse_events))
+        .route(
+            "/mcp",
+            post(handle_mcp_request)
+                .get(handle_streamable_events)
+                .delete(handle_delete_session)
+                .options(handle_options),
+        )
+        .route("/mcp/tools/dump", post(handle_direct_dump_tool))
         .route("/health", get(handle_health))
         .with_state(state)
         .layer(cors)
@@ -117,10 +132,9 @@ async fn run_async(bind: String) -> Result<()> {
             .context("register dump_dex tool")?;
     }
 
-    let (notifier, _) = broadcast::channel(256);
     let state = AppState {
         server: server.clone(),
-        notifier,
+        sessions: Arc::new(RwLock::new(HashMap::new())),
     };
 
     let app = build_router(state);
@@ -130,8 +144,8 @@ async fn run_async(bind: String) -> Result<()> {
         .with_context(|| format!("bind HTTP server to {bind}"))?;
     let addr: SocketAddr = listener.local_addr().context("resolve bound address")?;
 
-    println!("[MCP]  drizzleDumper MCP server listening on http://{addr}");
-    println!("[MCP]  Endpoints: POST /mcp, POST /mcp/notify, GET /mcp/events (SSE)");
+    println!("[MCP]  drizzleDumper MCP server (Streamable HTTP) listening on http://{addr}/mcp");
+    println!("[MCP]  Endpoints: POST /mcp, GET /mcp (SSE), DELETE /mcp (end session)");
     println!("[MCP]  Press Ctrl+C to stop the server.");
 
     let server_task = tokio::spawn(async move {
@@ -151,162 +165,229 @@ async fn run_async(bind: String) -> Result<()> {
     Ok(())
 }
 
-pub fn call_dump_tool_remote(base_url: &str, package: &str, cfg: &Config) -> Result<ToolResult> {
-    let runtime = TokioRuntimeBuilder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("create tokio runtime for remote MCP call")?;
-
-    runtime.block_on(call_dump_tool_remote_async(base_url, package, cfg))
+#[derive(Debug)]
+struct HttpError {
+    status: StatusCode,
+    payload: HttpErrorPayload,
 }
 
-async fn call_dump_tool_remote_async(
-    base_url: &str,
-    package: &str,
-    cfg: &Config,
-) -> Result<ToolResult> {
-    let (request_url, sse_url) = build_remote_urls(base_url);
-
-    let transport = HttpClientTransport::new(request_url, Some(sse_url))
-        .await
-        .context("connect HTTP transport")?;
-
-    let mut client = McpClient::new(
-        "drizzle-dumper-cli".to_string(),
-        env!("CARGO_PKG_VERSION").to_string(),
-    );
-
-    client
-        .connect(transport)
-        .await
-        .context("initialize MCP client")?;
-
-    let arguments = config_to_tool_arguments(package, cfg);
-    let result = client
-        .call_tool("dump_dex".to_string(), Some(arguments))
-        .await
-        .context("call dump_dex tool")?;
-
-    // Best-effort cleanup; ignore disconnect errors.
-    let _ = client.disconnect().await;
-
-    Ok(result)
+#[derive(Debug)]
+enum HttpErrorPayload {
+    Message(String),
+    JsonRpc {
+        id: RequestId,
+        code: i32,
+        message: String,
+    },
 }
 
-fn build_remote_urls(base_url: &str) -> (String, String) {
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with("/mcp") {
-        let call = trimmed.to_string();
-        let sse = format!("{}/events", trimmed);
-        (call, sse)
-    } else {
-        (
-            format!("{}/mcp", trimmed),
-            format!("{}/mcp/events", trimmed),
-        )
+impl HttpError {
+    fn message(status: StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            payload: HttpErrorPayload::Message(message.into()),
+        }
+    }
+
+    fn jsonrpc(status: StatusCode, id: RequestId, code: i32, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            payload: HttpErrorPayload::JsonRpc {
+                id,
+                code,
+                message: message.into(),
+            },
+        }
     }
 }
 
-fn config_to_tool_arguments(package: &str, cfg: &Config) -> HashMap<String, Value> {
-    let mut map = HashMap::new();
-    map.insert("package".to_string(), Value::String(package.to_string()));
-    map.insert("wait_time".to_string(), json!(cfg.wait_time));
-    map.insert(
-        "out_dir".to_string(),
-        Value::String(cfg.out_dir.to_string_lossy().into_owned()),
-    );
-    map.insert("dump_all".to_string(), json!(cfg.dump_all));
-    map.insert("fix_header".to_string(), json!(cfg.fix_header));
-    map.insert("scan_step".to_string(), json!(cfg.scan_step));
-    map.insert("min_size".to_string(), json!(cfg.min_region));
-    map.insert("max_size".to_string(), json!(cfg.max_region));
-    map.insert("min_dump_size".to_string(), json!(cfg.min_dump_size));
-    map.insert("signal_trigger".to_string(), json!(cfg.signal_trigger));
-    map.insert("watch_maps".to_string(), json!(cfg.watch_maps));
-    if let Some(threshold) = cfg.stage_threshold {
-        map.insert("stage_threshold".to_string(), json!(threshold));
+impl IntoResponse for HttpError {
+    fn into_response(self) -> Response {
+        match self.payload {
+            HttpErrorPayload::Message(message) => {
+                let body = Json(json!({ "error": message }));
+                (self.status, body).into_response()
+            }
+            HttpErrorPayload::JsonRpc { id, code, message } => {
+                let error = JsonRpcError::error(id, code, message, None);
+                (self.status, Json(JsonRpcMessage::Error(error))).into_response()
+            }
+        }
     }
-    if !cfg.map_patterns.is_empty() {
-        map.insert("map_patterns".to_string(), json!(cfg.map_patterns));
-    }
-    map
 }
 
 async fn handle_mcp_request(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<JsonRpcMessage>, (StatusCode, Json<JsonRpcMessage>)> {
+) -> Result<Response, HttpError> {
     if body_is_blank(body.as_ref()) {
-        return Err(json_rpc_error(
+        return Err(HttpError::jsonrpc(
             StatusCode::BAD_REQUEST,
-            serde_json::Value::Null,
+            RequestId::Null,
             error_codes::PARSE_ERROR,
             "Request body is empty",
         ));
     }
 
-    let request: JsonRpcRequest = serde_json::from_slice(&body).map_err(|err| {
-        json_rpc_error(
-            StatusCode::BAD_REQUEST,
-            serde_json::Value::Null,
-            error_codes::PARSE_ERROR,
-            format!("Failed to parse JSON request body: {err}"),
-        )
-    })?;
-    let request_id = request.id.clone();
+    let wants_event_stream = accept_includes_event_stream(&headers);
 
-    let result = {
-        let guard = state.server.lock().await;
-        guard.handle_request(request).await
+    let parsed_single: Result<JsonRpcMessage, _> = serde_json::from_slice(&body);
+    let messages: Vec<JsonRpcMessage> = match parsed_single {
+        Ok(message) => vec![message],
+        Err(_) => serde_json::from_slice(&body).map_err(|err| {
+            HttpError::jsonrpc(
+                StatusCode::BAD_REQUEST,
+                RequestId::Null,
+                error_codes::PARSE_ERROR,
+                format!("Failed to parse JSON body: {err}"),
+            )
+        })?,
     };
 
-    match result {
-        Ok(response) => Ok(Json(JsonRpcMessage::Response(response))),
-        Err(err) => {
-            let (code, message) = map_mcp_error(&err);
-            Err(json_rpc_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                request_id,
-                code,
-                message,
-            ))
+    let mut session_id = extract_session_id(&headers);
+    let mut session_handle = if let Some(ref id) = session_id {
+        Some(
+            get_session_handle(&state, id)
+                .await
+                .ok_or_else(|| HttpError::message(StatusCode::NOT_FOUND, "Unknown MCP session"))?,
+        )
+    } else {
+        None
+    };
+    let mut responses: Vec<JsonRpcMessage> = Vec::new();
+
+    for message in messages {
+        match message {
+            JsonRpcMessage::Request(request) => {
+                let is_initialize = request.method == methods::INITIALIZE;
+
+                if is_initialize {
+                    let (new_id, handle) = create_session(&state).await;
+                    session_id = Some(new_id);
+                    session_handle = Some(handle);
+                }
+
+                let handle =
+                    ensure_session_handle(&state, &mut session_handle, &mut session_id).await?;
+                let request_id = request.id.clone();
+                let response = {
+                    let server = state.server.clone();
+                    let guard = server.lock().await;
+                    guard.handle_request(request).await
+                }
+                .map_err(|err| {
+                    let (code, message) = map_mcp_error(&err);
+                    HttpError::jsonrpc(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        request_id.clone(),
+                        code,
+                        message,
+                    )
+                })?;
+
+                let message = JsonRpcMessage::Response(response);
+                if handle.sender.send(message.clone()).is_err() {
+                    tracing::debug!(
+                        "session {} has no active SSE listeners",
+                        session_id.as_deref().unwrap_or("<unknown>")
+                    );
+                }
+                responses.push(message);
+            }
+            JsonRpcMessage::Notification(notification) => {
+                let handle =
+                    ensure_session_handle(&state, &mut session_handle, &mut session_id).await?;
+                let message = JsonRpcMessage::Notification(notification);
+                let _ = handle.sender.send(message);
+            }
+            JsonRpcMessage::Response(response) => {
+                let handle =
+                    ensure_session_handle(&state, &mut session_handle, &mut session_id).await?;
+                let message = JsonRpcMessage::Response(response);
+                let _ = handle.sender.send(message);
+            }
+            JsonRpcMessage::Error(error) => {
+                let handle =
+                    ensure_session_handle(&state, &mut session_handle, &mut session_id).await?;
+                let message = JsonRpcMessage::Error(error);
+                let _ = handle.sender.send(message);
+            }
         }
     }
-}
 
-async fn handle_notification(
-    State(state): State<AppState>,
-    body: Bytes,
-) -> Result<StatusCode, (StatusCode, Json<JsonRpcMessage>)> {
-    if body_is_blank(body.as_ref()) {
-        return Ok(StatusCode::NO_CONTENT);
+    let mut response = if responses.is_empty() {
+        Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .body(Body::empty())
+            .map_err(|_| {
+                HttpError::message(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to build response body",
+                )
+            })?
+    } else if wants_event_stream {
+        let stream = tokio_stream::iter(responses.clone().into_iter().map(|message| {
+            serde_json::to_string(&message)
+                .map(|json| Ok::<Event, Infallible>(Event::default().data(json)))
+                .unwrap_or_else(|err| {
+                    tracing::error!("Failed to serialize JSON-RPC message: {err}");
+                    Ok::<Event, Infallible>(Event::default().data("{}"))
+                })
+        }));
+        Sse::new(stream)
+            .keep_alive(
+                KeepAlive::new()
+                    .interval(Duration::from_secs(30))
+                    .text("keep-alive"),
+            )
+            .into_response()
+    } else if responses.len() == 1 {
+        Json(responses.into_iter().next().unwrap()).into_response()
+    } else {
+        Json(responses).into_response()
+    };
+
+    if let Some(ref id) = session_id {
+        response.headers_mut().insert(
+            "Mcp-Session-Id",
+            HeaderValue::from_str(id).map_err(|_| {
+                HttpError::message(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Invalid session identifier",
+                )
+            })?,
+        );
     }
 
-    let notification: JsonRpcNotification = serde_json::from_slice(&body).map_err(|err| {
-        json_rpc_error(
-            StatusCode::BAD_REQUEST,
-            serde_json::Value::Null,
-            error_codes::PARSE_ERROR,
-            format!("Failed to parse JSON notification body: {err}"),
-        )
-    })?;
-
-    // Broadcast to SSE listeners; ignore if nobody is listening.
-    let _ = state.notifier.send(notification);
-
-    Ok(StatusCode::OK)
+    Ok(response)
 }
 
-async fn handle_sse_events(
+async fn handle_streamable_events(
     State(state): State<AppState>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
-    let receiver = state.notifier.subscribe();
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    if !accept_includes_event_stream(&headers) {
+        return Err(HttpError::message(
+            StatusCode::NOT_ACCEPTABLE,
+            "Accept header must include text/event-stream",
+        ));
+    }
+
+    let session_id = extract_session_id(&headers).ok_or_else(|| {
+        HttpError::message(StatusCode::BAD_REQUEST, "Missing Mcp-Session-Id header")
+    })?;
+    let handle = get_session_handle(&state, &session_id)
+        .await
+        .ok_or_else(|| HttpError::message(StatusCode::NOT_FOUND, "Unknown MCP session"))?;
+
+    let receiver = handle.sender.subscribe();
     let stream = BroadcastStream::new(receiver).filter_map(|msg| async move {
         match msg {
-            Ok(notification) => match serde_json::to_string(&notification) {
-                Ok(json) => Some(Ok(Event::default().data(json))),
+            Ok(message) => match serde_json::to_string(&message) {
+                Ok(json) => Some(Ok::<Event, Infallible>(Event::default().data(json))),
                 Err(err) => {
-                    tracing::error!("Failed to serialize notification: {err}");
+                    tracing::error!("Failed to serialize SSE message: {err}");
                     None
                 }
             },
@@ -314,11 +395,92 @@ async fn handle_sse_events(
         }
     });
 
-    Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(30))
-            .text("keep-alive"),
-    )
+    let mut response = Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(30))
+                .text("keep-alive"),
+        )
+        .into_response();
+    response.headers_mut().insert(
+        "Mcp-Session-Id",
+        HeaderValue::from_str(&session_id).map_err(|_| {
+            HttpError::message(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Invalid session identifier",
+            )
+        })?,
+    );
+    Ok(response)
+}
+
+async fn handle_delete_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, HttpError> {
+    let session_id = extract_session_id(&headers).ok_or_else(|| {
+        HttpError::message(StatusCode::BAD_REQUEST, "Missing Mcp-Session-Id header")
+    })?;
+
+    if remove_session(&state, &session_id).await {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(HttpError::message(
+            StatusCode::NOT_FOUND,
+            "Unknown MCP session",
+        ))
+    }
+}
+
+async fn handle_direct_dump_tool(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Json<ToolResult>, (StatusCode, Json<Value>)> {
+    if body_is_blank(body.as_ref()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Request body is empty" })),
+        ));
+    }
+
+    let payload: Value = serde_json::from_slice(&body).map_err(|err| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("Invalid JSON body: {err}") })),
+        )
+    })?;
+
+    let args = payload
+        .as_object()
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "JSON body must be an object" })),
+            )
+        })?
+        .clone()
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+    if !args.contains_key("package") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing required field `package`" })),
+        ));
+    }
+
+    let guard = state.server.lock().await;
+    let result = guard
+        .call_tool("dump_dex", Some(args))
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": err.to_string() })),
+            )
+        })?;
+
+    Ok(Json(result))
 }
 
 async fn handle_options() -> StatusCode {
@@ -340,14 +502,22 @@ fn body_is_blank(body: &[u8]) -> bool {
     body.iter().all(|byte| byte.is_ascii_whitespace())
 }
 
-fn json_rpc_error(
-    status: StatusCode,
-    id: RequestId,
-    code: i32,
-    message: impl Into<String>,
-) -> (StatusCode, Json<JsonRpcMessage>) {
-    let error = JsonRpcError::error(id, code, message.into(), None);
-    (status, Json(JsonRpcMessage::Error(error)))
+fn accept_includes_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .map(|v| {
+            v.split(',')
+                .any(|item| item.trim().eq_ignore_ascii_case("text/event-stream"))
+        })
+        .unwrap_or(false)
+}
+
+fn extract_session_id(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("Mcp-Session-Id")
+        .and_then(|value| value.to_str().ok())
+        .map(|s| s.to_string())
 }
 
 fn map_mcp_error(err: &McpError) -> (i32, String) {
@@ -361,6 +531,63 @@ fn map_mcp_error(err: &McpError) -> (i32, String) {
         _ => error_codes::INTERNAL_ERROR,
     };
     (code, message)
+}
+
+async fn ensure_session_handle(
+    state: &AppState,
+    session_handle: &mut Option<Arc<SessionHandle>>,
+    session_id: &mut Option<String>,
+) -> Result<Arc<SessionHandle>, HttpError> {
+    if let Some(handle) = session_handle.as_ref() {
+        return Ok(handle.clone());
+    }
+
+    if let Some(ref id) = session_id {
+        if let Some(handle) = get_session_handle(state, id).await {
+            *session_handle = Some(handle.clone());
+            return Ok(handle);
+        }
+        return Err(HttpError::message(
+            StatusCode::NOT_FOUND,
+            "Unknown MCP session",
+        ));
+    }
+
+    Err(HttpError::message(
+        StatusCode::BAD_REQUEST,
+        "Missing Mcp-Session-Id header; run initialize first",
+    ))
+}
+
+async fn create_session(state: &AppState) -> (String, Arc<SessionHandle>) {
+    loop {
+        let candidate = generate_session_id();
+        let handle = Arc::new(SessionHandle::new());
+        let mut sessions = state.sessions.write().await;
+        if sessions.contains_key(&candidate) {
+            continue;
+        }
+        sessions.insert(candidate.clone(), handle.clone());
+        return (candidate, handle);
+    }
+}
+
+async fn get_session_handle(state: &AppState, id: &str) -> Option<Arc<SessionHandle>> {
+    let sessions = state.sessions.read().await;
+    sessions.get(id).cloned()
+}
+
+async fn remove_session(state: &AppState, id: &str) -> bool {
+    let mut sessions = state.sessions.write().await;
+    sessions.remove(id).is_some()
+}
+
+fn generate_session_id() -> String {
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect()
 }
 
 #[derive(Default)]
@@ -511,27 +738,48 @@ mod tests {
     use super::*;
     use axum::{
         body::{self, Body},
-        http::{header::CONTENT_TYPE, Method, Request},
+        http::{
+            header::{ACCEPT, CONTENT_TYPE},
+            Method, Request,
+        },
     };
-    use crate::config::Config;
     use serde_json::{json, Value as JsonValue};
-    use std::io::ErrorKind;
-    use std::path::PathBuf;
-    use tokio::sync::{broadcast, Mutex};
+    use tokio::sync::{Mutex, RwLock};
     use tower::ServiceExt;
 
-    fn make_test_app() -> Router {
-        let server = Arc::new(Mutex::new(McpServer::new(
-            "test-server".to_string(),
-            "0.0.1".to_string(),
-        )));
-        let (notifier, _) = broadcast::channel(8);
-        build_router(AppState { server, notifier })
+    fn make_app(server: Arc<Mutex<McpServer>>) -> Router {
+        build_router(AppState {
+            server,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+        })
+    }
+
+    fn initialize_body() -> Body {
+        Body::from(
+            serde_json::to_vec(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "test-client",
+                        "version": "0.0.1"
+                    }
+                }
+            }))
+            .unwrap(),
+        )
     }
 
     #[tokio::test]
     async fn empty_body_returns_json_parse_error() {
-        let app = make_test_app();
+        let server = Arc::new(Mutex::new(McpServer::new(
+            "test-server".to_string(),
+            "0.0.1".to_string(),
+        )));
+        let app = make_app(server);
         let response = app
             .oneshot(
                 Request::builder()
@@ -560,7 +808,11 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_json_returns_parse_error() {
-        let app = make_test_app();
+        let server = Arc::new(Mutex::new(McpServer::new(
+            "test-server".to_string(),
+            "0.0.1".to_string(),
+        )));
+        let app = make_app(server);
         let response = app
             .oneshot(
                 Request::builder()
@@ -586,12 +838,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_call_invokes_dump_tool() {
+    async fn initialize_returns_session_header() {
         let server = Arc::new(Mutex::new(McpServer::new(
-            "test-remote".to_string(),
-            "0.1.0".to_string(),
+            "test-server".to_string(),
+            "0.0.1".to_string(),
         )));
+        let app = make_app(server);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(initialize_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
+        assert_eq!(response.status(), StatusCode::OK);
+        let session_header = response.headers().get("Mcp-Session-Id").unwrap();
+        assert!(!session_header.is_empty());
+
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: JsonValue = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["jsonrpc"], "2.0");
+        assert!(json["result"].is_object());
+    }
+
+    #[tokio::test]
+    async fn tools_list_without_session_is_rejected() {
+        let server = Arc::new(Mutex::new(McpServer::new(
+            "test-server".to_string(),
+            "0.0.1".to_string(),
+        )));
+        let app = make_app(server);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "jsonrpc": "2.0",
+                            "id": 42,
+                            "method": "tools/list",
+                            "params": {}
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: JsonValue = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .contains("Missing Mcp-Session-Id"));
+    }
+
+    #[tokio::test]
+    async fn tool_call_succeeds_after_initialize() {
+        let server = Arc::new(Mutex::new(McpServer::new(
+            "test-server".to_string(),
+            "0.0.1".to_string(),
+        )));
         let captured: Arc<Mutex<Option<HashMap<String, serde_json::Value>>>> =
             Arc::new(Mutex::new(None));
         {
@@ -599,12 +919,10 @@ mod tests {
             guard
                 .add_tool(
                     "dump_dex".to_string(),
-                    Some("Dummy tool".to_string()),
+                    Some("dummy".to_string()),
                     json!({
                         "type": "object",
-                        "properties": {
-                            "package": {"type": "string"}
-                        },
+                        "properties": { "package": {"type": "string"} },
                         "required": ["package"]
                     }),
                     DummyTool {
@@ -615,74 +933,167 @@ mod tests {
                 .unwrap();
         }
 
-        let (notifier, _) = broadcast::channel(8);
-        let app = build_router(AppState {
-            server: server.clone(),
-            notifier,
-        });
-        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
-            Ok(listener) => listener,
-            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
-                eprintln!("skipping remote_call_invokes_dump_tool: {err}");
-                return;
-            }
-            Err(err) => panic!("failed to bind test server: {err}"),
-        };
-        let addr = listener.local_addr().unwrap();
-        let server_task = tokio::spawn(async move {
-            if let Err(err) = axum::serve(listener, app).await {
-                panic!("test server error: {err}");
-            }
-        });
+        let app = make_app(server);
+        let init_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(initialize_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let session_id = init_response
+            .headers()
+            .get("Mcp-Session-Id")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
 
-        let mut cfg = Config::default();
-        cfg.wait_time = 1.25;
-        cfg.dump_all = true;
-        cfg.fix_header = true;
-        cfg.scan_step = 2048;
-        cfg.min_region = 0x2000;
-        cfg.max_region = 0x4000;
-        cfg.min_dump_size = 0x180;
-        cfg.signal_trigger = true;
-        cfg.watch_maps = true;
-        cfg.stage_threshold = Some(3);
-        cfg.map_patterns.push("classes.dex".into());
-        cfg.out_dir = PathBuf::from("/data/local/tmp/tests");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(CONTENT_TYPE, "application/json")
+                    .header("Mcp-Session-Id", session_id)
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "method": "tools/call",
+                            "params": {
+                                "name": "dump_dex",
+                                "arguments": {
+                                    "package": "com.example.app"
+                                }
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-        let result = call_dump_tool_remote_async(
-            &format!("http://{addr}"),
-            "com.example.app",
-            &cfg,
-        )
-        .await
-        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: JsonValue = serde_json::from_slice(&body).unwrap();
+        assert!(json["result"].is_object());
+        assert!(captured.lock().await.is_some());
+    }
 
-        assert_eq!(result.is_error, Some(false));
-        assert!(result
-            .structured_content
-            .as_ref()
-            .and_then(|v| v.get("paths"))
-            .is_some());
+    #[tokio::test]
+    async fn get_requires_event_stream_accept() {
+        let server = Arc::new(Mutex::new(McpServer::new(
+            "test-server".to_string(),
+            "0.0.1".to_string(),
+        )));
+        let app = make_app(server);
+        let init_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(initialize_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let session_id = init_response
+            .headers()
+            .get("Mcp-Session-Id")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
 
-        let stored = captured.lock().await.clone().unwrap();
-        assert_eq!(
-            stored
-                .get("package")
-                .and_then(|v| v.as_str())
-                .unwrap(),
-            "com.example.app"
-        );
-        assert_eq!(stored.get("wait_time").unwrap(), &json!(1.25));
-        assert_eq!(stored.get("dump_all").unwrap(), &json!(true));
-        assert_eq!(stored.get("watch_maps").unwrap(), &json!(true));
-        assert_eq!(
-            stored.get("map_patterns").unwrap(),
-            &json!(["classes.dex"])
-        );
-        assert_eq!(stored.get("stage_threshold").unwrap(), &json!(3));
+        let missing_accept = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/mcp")
+                    .header("Mcp-Session-Id", &session_id)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_accept.status(), StatusCode::NOT_ACCEPTABLE);
 
-        server_task.abort();
-        let _ = server_task.await;
+        let ok_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/mcp")
+                    .header("Mcp-Session-Id", session_id)
+                    .header(ACCEPT, "text/event-stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok_response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn direct_endpoint_invokes_tool() {
+        let server = Arc::new(Mutex::new(McpServer::new(
+            "test-server".to_string(),
+            "0.0.1".to_string(),
+        )));
+
+        let captured: Arc<Mutex<Option<HashMap<String, serde_json::Value>>>> =
+            Arc::new(Mutex::new(None));
+        {
+            let guard = server.lock().await;
+            guard
+                .add_tool(
+                    "dump_dex".to_string(),
+                    Some("dummy".to_string()),
+                    json!({
+                        "type": "object",
+                        "properties": { "package": {"type": "string"} },
+                        "required": ["package"]
+                    }),
+                    DummyTool {
+                        captured: captured.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let app = make_app(server);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp/tools/dump")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "package": "com.example.app",
+                            "dump_all": true
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(captured.lock().await.is_some());
     }
 
     struct DummyTool {
@@ -695,19 +1106,12 @@ mod tests {
             &self,
             arguments: HashMap<String, serde_json::Value>,
         ) -> Result<ToolResult, McpError> {
-            assert_eq!(
-                arguments
-                    .get("package")
-                    .and_then(|v| v.as_str())
-                    .unwrap(),
-                "com.example.app"
-            );
             let mut guard = self.captured.lock().await;
             *guard = Some(arguments);
             Ok(ToolResult {
-                content: vec![Content::text("remote ok".to_string())],
+                content: vec![Content::text("ok".to_string())],
                 is_error: Some(false),
-                structured_content: Some(json!({"paths": ["/tmp/foo.dex"]})),
+                structured_content: None,
                 meta: None,
             })
         }
