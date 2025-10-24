@@ -10,12 +10,14 @@ Usage
 -----
 
 ```
-drizzle_dumper <package_name> [wait_seconds]
+drizzle_dumper --mcp-server [bind_addr]
+drizzle_dumper <package_name> [wait_seconds] [options]
 ```
 
-* 需要 root 权限。
+* 需要 root 权限（远程调用除外，远程调用由服务器侧负责权限）。
 * 默认轮询间隔为 0 秒，可通过 `wait_seconds` 指定轮询周期。
 * dump 成功后文件保存在 `/data/local/tmp/<package>_dumped_<addr>.dex`。
+* `--mcp-server` 启动符合 Streamable HTTP 规范的 MCP 服务器。远程调用可通过 MCP 会话调用工具，或直接 `POST /mcp/tools/dump` 传入 JSON（至少包含 `package`）。
 
 Build
 -----
