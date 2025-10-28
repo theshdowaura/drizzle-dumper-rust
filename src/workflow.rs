@@ -3,13 +3,17 @@ use std::{fs, path::PathBuf, thread, time::Duration};
 use anyhow::{Context, Result};
 use procfs::process::{all_processes, MMapPath, MemoryMap, Process};
 
-use crate::config::Config;
+use crate::config::{Config, DumpMode};
 use crate::ptrace::try_dump_dex;
 use crate::signals::{
     clear_trigger_flag, install_sigusr1_handler, is_triggered, reset_trigger_flag,
 };
 
 pub fn run_dump_workflow(package_name: &str, cfg: &Config) -> Result<Vec<PathBuf>> {
+    if matches!(cfg.dump_mode, DumpMode::Frida) {
+        return crate::frida_hook::run_frida_workflow(package_name, cfg);
+    }
+
     println!(
         "[*]  Try to Find {}{}",
         package_name,
@@ -207,7 +211,7 @@ fn find_process_pid(package_name: &str) -> Result<Option<i32>> {
     Ok(None)
 }
 
-fn find_clone_thread(pid: i32) -> Result<Option<i32>> {
+pub(crate) fn find_clone_thread(pid: i32) -> Result<Option<i32>> {
     let mut max_tid: Option<i32> = None;
     let task_dir = format!("/proc/{pid}/task");
     for entry in fs::read_dir(&task_dir).with_context(|| format!("open {task_dir}"))? {

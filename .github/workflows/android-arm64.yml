@@ -5,6 +5,12 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      gadget_version:
+        description: "Frida gadget release tag (e.g. 16.3.6)"
+        required: false
+        default: "16.3.6"
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,6 +19,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    if: github.event.inputs.gadget_version == ''
 
     steps:
       - name: Checkout
@@ -46,3 +53,39 @@ jobs:
         with:
           name: drizzle-dumper-android-arm64
           path: target/aarch64-linux-android/release/drizzle_dumper
+
+  prepare-gadget:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.gadget_version != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Frida gadget
+        env:
+          VERSION: ${{ github.event.inputs.gadget_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p assets/frida/arm64
+          url="https://github.com/frida/frida/releases/download/${VERSION}/frida-gadget-${VERSION}-android-arm64.so.xz"
+          echo "Fetching $url"
+          curl -L "$url" -o gadget.so.xz
+          unxz -f gadget.so.xz
+          mv frida-gadget-${VERSION}-android-arm64.so assets/frida/arm64/frida-gadget.so
+
+      - name: Commit updated gadget
+        env:
+          VERSION: ${{ github.event.inputs.gadget_version }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add assets/frida/arm64/frida-gadget.so
+          if git diff --cached --quiet; then
+            echo "No gadget changes to commit"
+          else
+            git commit -m "Update Frida gadget ${VERSION}"
+            git push
+          fi

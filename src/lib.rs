@@ -1,4 +1,6 @@
 pub mod config;
+pub mod frida_gadget;
+pub mod frida_hook;
 pub mod mcp;
 #[path = "ptrace/mod.rs"]
 pub mod ptrace;

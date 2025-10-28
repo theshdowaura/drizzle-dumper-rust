@@ -39,13 +39,22 @@ use tokio::{
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::config::Config;
+use crate::config::{Config, DumpMode};
+#[cfg(feature = "frida")]
+use crate::frida_gadget::{prepare_gadget, wait_for_gadget, GadgetDeployment};
+#[cfg(feature = "frida")]
+use crate::ptrace::inject_library;
+#[cfg(feature = "frida")]
+use crate::workflow::{find_clone_thread, find_process_pid};
+
 use crate::workflow::run_dump_workflow;
 
 #[derive(Clone)]
 struct AppState {
     server: Arc<Mutex<McpServer>>,
     sessions: Arc<RwLock<HashMap<String, Arc<SessionHandle>>>>,
+    #[cfg(feature = "frida")]
+    gadgets: Arc<Mutex<HashMap<String, GadgetDeployment>>>,
 }
 
 struct SessionHandle {
@@ -96,45 +105,92 @@ async fn run_async(bind: String) -> Result<()> {
         "drizzle-dumper".to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
     )));
+    #[cfg(feature = "frida")]
+    let gadget_registry = Arc::new(Mutex::new(HashMap::new()));
+
     {
         let guard = server.lock().await;
+        let generic_schema = dump_tool_schema(true);
         guard
             .add_tool(
                 "dump_dex".to_string(),
-                Some("Dump DEX/CDEX regions for a running package".to_string()),
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "package": {"type": "string"},
-                        "wait_time": {"type": "number"},
-                        "out_dir": {"type": "string"},
-                        "dump_all": {"type": "boolean"},
-                        "fix_header": {"type": "boolean"},
-                        "scan_step": {"type": "integer", "minimum": 1},
-                        "min_size": {"type": "integer", "minimum": 1},
-                        "max_size": {"type": "integer", "minimum": 1},
-                        "min_dump_size": {"type": "integer", "minimum": 1},
-                        "signal_trigger": {"type": "boolean"},
-                        "watch_maps": {"type": "boolean"},
-                        "stage_threshold": {"type": "integer", "minimum": 1},
-                        "map_patterns": {
-                            "oneOf": [
-                                {"type": "string"},
-                                {"type": "array", "items": {"type": "string"}}
-                            ]
-                        }
-                    },
-                    "required": ["package"],
-                }),
-                DumpTool::default(),
+                Some("Dump DEX/CDEX regions for a running package (auto mode)".to_string()),
+                generic_schema.clone(),
+                {
+                    let tool = DumpTool::new(None);
+                    #[cfg(feature = "frida")]
+                    let tool = tool.with_gadget_store(gadget_registry.clone());
+                    tool
+                },
             )
             .await
             .context("register dump_dex tool")?;
+        guard
+            .add_tool(
+                "dump_dex_ptrace".to_string(),
+                Some("Dump DEX/CDEX regions using ptrace scanning".to_string()),
+                dump_tool_schema(false),
+                {
+                    let tool = DumpTool::new(Some(DumpMode::Ptrace));
+                    #[cfg(feature = "frida")]
+                    let tool = tool.with_gadget_store(gadget_registry.clone());
+                    tool
+                },
+            )
+            .await
+            .context("register dump_dex_ptrace tool")?;
+        guard
+            .add_tool(
+                "dump_dex_frida".to_string(),
+                Some("Dump DEX/CDEX regions via FRIDA hooks".to_string()),
+                generic_schema,
+                {
+                    let tool = DumpTool::new(Some(DumpMode::Frida));
+                    #[cfg(feature = "frida")]
+                    let tool = tool.with_gadget_store(gadget_registry.clone());
+                    tool
+                },
+            )
+            .await
+            .context("register dump_dex_frida tool")?;
+
+        #[cfg(feature = "frida")]
+        {
+            guard
+                .add_tool(
+                    "prepare_frida_gadget".to_string(),
+                    Some("Prepare FRIDA gadget on device".to_string()),
+                    gadget_prepare_schema(),
+                    PrepareGadgetTool::new(gadget_registry.clone()),
+                )
+                .await
+                .context("register prepare_frida_gadget tool")?;
+            guard
+                .add_tool(
+                    "inject_frida_gadget".to_string(),
+                    Some("Inject prepared FRIDA gadget into target process".to_string()),
+                    gadget_inject_schema(),
+                    InjectGadgetTool::new(gadget_registry.clone()),
+                )
+                .await
+                .context("register inject_frida_gadget tool")?;
+            guard
+                .add_tool(
+                    "cleanup_frida_gadget".to_string(),
+                    Some("Cleanup and remove prepared FRIDA gadget".to_string()),
+                    gadget_cleanup_schema(),
+                    CleanupGadgetTool::new(gadget_registry.clone()),
+                )
+                .await
+                .context("register cleanup_frida_gadget tool")?;
+        }
     }
 
     let state = AppState {
         server: server.clone(),
         sessions: Arc::new(RwLock::new(HashMap::new())),
+        #[cfg(feature = "frida")]
+        gadgets: gadget_registry.clone(),
     };
 
     let app = build_router(state);
@@ -561,7 +617,7 @@ async fn ensure_session_handle(
 
 async fn create_session(state: &AppState) -> (String, Arc<SessionHandle>) {
     loop {
-        let candidate = generate_session_id();
+        let candidate = generate_random_id();
         let handle = Arc::new(SessionHandle::new());
         let mut sessions = state.sessions.write().await;
         if sessions.contains_key(&candidate) {
@@ -582,7 +638,7 @@ async fn remove_session(state: &AppState, id: &str) -> bool {
     sessions.remove(id).is_some()
 }
 
-fn generate_session_id() -> String {
+fn generate_random_id() -> String {
     rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(32)
@@ -590,9 +646,11 @@ fn generate_session_id() -> String {
         .collect()
 }
 
-#[derive(Default)]
 struct DumpTool {
     lock: Mutex<()>,
+    forced_mode: Option<DumpMode>,
+    #[cfg(feature = "frida")]
+    gadget_store: Option<Arc<Mutex<HashMap<String, GadgetDeployment>>>>,
 }
 
 #[async_trait]
@@ -606,7 +664,32 @@ impl ToolHandler for DumpTool {
             .ok_or_else(|| McpError::validation("missing required string parameter `package`"))?
             .to_string();
 
-        let cfg = config_from_args(&arguments)?;
+        let mut cfg = config_from_args(&arguments)?;
+        if let Some(mode) = self.forced_mode {
+            cfg.dump_mode = mode;
+        }
+        #[cfg(feature = "frida")]
+        if let Some(store) = &self.gadget_store {
+            if let Some(id) = cfg.frida.gadget_id.clone() {
+                let (library_path, config_path, port, keep) = {
+                    let guard = store.lock().await;
+                    let deployment = guard
+                        .get(&id)
+                        .ok_or_else(|| McpError::validation(format!("unknown gadget id `{id}`")))?;
+                    (
+                        deployment.library_path.clone(),
+                        Some(deployment.config_path.clone()),
+                        deployment.port,
+                        deployment.keep_files(),
+                    )
+                };
+                cfg.frida.gadget_enabled = true;
+                cfg.frida.gadget_library_path = Some(library_path);
+                cfg.frida.gadget_config_path = config_path;
+                cfg.frida.gadget_port = Some(port);
+                cfg.frida.gadget_keep_files = keep;
+            }
+        }
         let result = task::spawn_blocking(move || run_dump_workflow(&package, &cfg))
             .await
             .map_err(|err| McpError::internal(format!("dump task join error: {err}")))?;
@@ -629,6 +712,253 @@ impl ToolHandler for DumpTool {
             structured_content: None,
             meta: None,
         })
+    }
+}
+
+impl DumpTool {
+    fn new(forced_mode: Option<DumpMode>) -> Self {
+        Self {
+            lock: Mutex::new(()),
+            forced_mode,
+            #[cfg(feature = "frida")]
+            gadget_store: None,
+        }
+    }
+
+    #[cfg(feature = "frida")]
+    fn with_gadget_store(mut self, store: Arc<Mutex<HashMap<String, GadgetDeployment>>>) -> Self {
+        self.gadget_store = Some(store);
+        self
+    }
+}
+
+#[cfg(feature = "frida")]
+struct GadgetInfo {
+    library_path: PathBuf,
+    config_path: Option<PathBuf>,
+    port: u16,
+}
+
+#[cfg(feature = "frida")]
+impl GadgetInfo {
+    fn from_deployment(dep: &GadgetDeployment) -> Self {
+        Self {
+            library_path: dep.library_path.clone(),
+            config_path: Some(dep.config_path.clone()),
+            port: dep.port,
+        }
+    }
+
+    fn library_display(&self) -> String {
+        self.library_path.display().to_string()
+    }
+
+    fn config_display(&self) -> String {
+        self.config_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".to_string())
+    }
+}
+
+#[cfg(feature = "frida")]
+struct PrepareGadgetTool {
+    registry: Arc<Mutex<HashMap<String, GadgetDeployment>>>,
+}
+
+#[cfg(feature = "frida")]
+impl PrepareGadgetTool {
+    fn new(registry: Arc<Mutex<HashMap<String, GadgetDeployment>>>) -> Self {
+        Self { registry }
+    }
+}
+
+#[cfg(feature = "frida")]
+#[async_trait]
+impl ToolHandler for PrepareGadgetTool {
+    async fn call(&self, arguments: HashMap<String, Value>) -> Result<ToolResult, McpError> {
+        let cfg = gadget_config_from_args(&arguments)?;
+        let deployment = task::spawn_blocking(move || prepare_gadget(&cfg))
+            .await
+            .map_err(|err| McpError::internal(format!("prepare gadget task failed: {err}")))?
+            .map_err(|err| McpError::internal(err.to_string()))?;
+
+        let info = GadgetInfo::from_deployment(&deployment);
+        let id = generate_random_id();
+
+        {
+            let mut guard = self.registry.lock().await;
+            guard.insert(id.clone(), deployment);
+        }
+
+        let message = format!(
+            "Prepared FRIDA gadget `{}` at {} (config {}, port {})",
+            id,
+            info.library_display(),
+            info.config_display(),
+            info.port
+        );
+
+        Ok(ToolResult {
+            content: vec![Content::text(message)],
+            is_error: None,
+            structured_content: Some(json!({
+                "deployment_id": id,
+                "library_path": info.library_path,
+                "config_path": info.config_path,
+                "port": info.port,
+            })),
+            meta: None,
+        })
+    }
+}
+
+#[cfg(feature = "frida")]
+struct InjectGadgetTool {
+    registry: Arc<Mutex<HashMap<String, GadgetDeployment>>>,
+}
+
+#[cfg(feature = "frida")]
+impl InjectGadgetTool {
+    fn new(registry: Arc<Mutex<HashMap<String, GadgetDeployment>>>) -> Self {
+        Self { registry }
+    }
+}
+
+#[cfg(feature = "frida")]
+#[async_trait]
+impl ToolHandler for InjectGadgetTool {
+    async fn call(&self, arguments: HashMap<String, Value>) -> Result<ToolResult, McpError> {
+        let deployment_id = arguments
+            .get("deployment_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| McpError::validation("missing `deployment_id`"))?
+            .to_string();
+
+        let info = {
+            let guard = self.registry.lock().await;
+            let deployment = guard.get(&deployment_id).ok_or_else(|| {
+                McpError::validation(format!("unknown gadget id `{deployment_id}`"))
+            })?;
+            GadgetInfo::from_deployment(deployment)
+        };
+
+        let pid_arg = arguments.get("pid").map(|v| as_u64("pid", v)).transpose()?;
+        let package_arg = arguments
+            .get("package")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string());
+        if pid_arg.is_none() && package_arg.is_none() {
+            return Err(McpError::validation(
+                "`inject_frida_gadget` requires either `pid` or `package`",
+            ));
+        }
+
+        let timeout_secs = arguments
+            .get("timeout")
+            .map(|v| as_u64("timeout", v))
+            .transpose()?
+            .unwrap_or(10);
+
+        let library_path = info.library_path.clone();
+        let config_path = info.config_path.clone();
+        let port = info.port;
+        let package_for_spawn = package_arg.clone();
+        let result = task::spawn_blocking(move || -> Result<()> {
+            let pid = if let Some(pid) = pid_arg {
+                pid as i32
+            } else {
+                let package = package_for_spawn.as_deref().unwrap();
+                find_process_pid(package)?.ok_or_else(|| anyhow!("process {package} not found"))?
+            };
+            let tid =
+                find_clone_thread(pid)?.ok_or_else(|| anyhow!("no thread found for pid {pid}"))?;
+
+            let prev_env = std::env::var_os("FRIDA_GADGET_CONFIG");
+            if let Some(config_path) = config_path.as_deref() {
+                std::env::set_var("FRIDA_GADGET_CONFIG", config_path);
+            }
+
+            inject_library(tid, library_path.as_path())?;
+            wait_for_gadget(port, Duration::from_secs(timeout_secs))?;
+
+            match (config_path.as_deref(), prev_env) {
+                (_, Some(prev)) => std::env::set_var("FRIDA_GADGET_CONFIG", prev),
+                (Some(_), None) => std::env::remove_var("FRIDA_GADGET_CONFIG"),
+                _ => {}
+            }
+
+            Ok(())
+        })
+        .await
+        .map_err(|err| McpError::internal(format!("inject gadget task failed: {err}")))??;
+
+        let target_desc = package_arg
+            .as_deref()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| format!("pid {}", pid_arg.unwrap()));
+
+        Ok(ToolResult {
+            content: vec![Content::text(format!(
+                "Injected gadget `{}` into {target_desc}; listening on {}",
+                deployment_id, info.port
+            ))],
+            is_error: None,
+            structured_content: Some(json!({
+                "deployment_id": deployment_id,
+                "target": target_desc,
+                "port": info.port,
+            })),
+            meta: None,
+        })
+    }
+}
+
+#[cfg(feature = "frida")]
+struct CleanupGadgetTool {
+    registry: Arc<Mutex<HashMap<String, GadgetDeployment>>>,
+}
+
+#[cfg(feature = "frida")]
+impl CleanupGadgetTool {
+    fn new(registry: Arc<Mutex<HashMap<String, GadgetDeployment>>>) -> Self {
+        Self { registry }
+    }
+}
+
+#[cfg(feature = "frida")]
+#[async_trait]
+impl ToolHandler for CleanupGadgetTool {
+    async fn call(&self, arguments: HashMap<String, Value>) -> Result<ToolResult, McpError> {
+        let id = arguments
+            .get("deployment_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| McpError::validation("missing `deployment_id`"))?
+            .to_string();
+
+        let removed = {
+            let mut guard = self.registry.lock().await;
+            guard.remove(&id)
+        };
+
+        match removed {
+            Some(deployment) => {
+                deployment.cleanup();
+                Ok(ToolResult {
+                    content: vec![Content::text(format!("Cleaned up FRIDA gadget `{}`", id))],
+                    is_error: None,
+                    structured_content: None,
+                    meta: None,
+                })
+            }
+            None => Err(McpError::validation(format!("unknown gadget id `{id}`"))),
+        }
+    }
+}
+
+impl Default for DumpTool {
+    fn default() -> Self {
+        Self::new(None)
     }
 }
 
@@ -697,7 +1027,199 @@ fn config_from_args(arguments: &HashMap<String, Value>) -> Result<Config, McpErr
         }
     }
 
+    if let Some(mode) = arguments.get("mode") {
+        let value = as_string("mode", mode)?;
+        match value.to_ascii_lowercase().as_str() {
+            "frida" => cfg.dump_mode = DumpMode::Frida,
+            "ptrace" => cfg.dump_mode = DumpMode::Ptrace,
+            other => {
+                return Err(McpError::validation(format!(
+                    "`mode` must be `ptrace` or `frida`, got {other}"
+                )))
+            }
+        }
+    }
+    if let Some(flag) = arguments.get("frida") {
+        if as_bool("frida", flag)? {
+            cfg.dump_mode = DumpMode::Frida;
+        }
+    }
+    if let Some(remote) = arguments.get("frida_remote") {
+        cfg.frida.remote = Some(as_string("frida_remote", remote)?);
+    }
+    if let Some(usb) = arguments.get("frida_usb") {
+        cfg.frida.use_usb = as_bool("frida_usb", usb)?;
+    }
+    if let Some(spawn) = arguments.get("frida_spawn") {
+        cfg.frida.spawn = as_bool("frida_spawn", spawn)?;
+    }
+    if let Some(attach) = arguments.get("frida_attach") {
+        if as_bool("frida_attach", attach)? {
+            cfg.frida.spawn = false;
+        }
+    }
+    if let Some(no_resume) = arguments.get("frida_no_resume") {
+        if as_bool("frida_no_resume", no_resume)? {
+            cfg.frida.resume_after_spawn = false;
+        }
+    }
+    if let Some(script) = arguments.get("frida_script") {
+        cfg.frida.script_path = Some(PathBuf::from(as_string("frida_script", script)?));
+    }
+    if let Some(chunk) = arguments.get("frida_chunk") {
+        let parsed = as_u64("frida_chunk", chunk)? as usize;
+        cfg.frida.chunk_size = parsed.max(4096);
+    }
+    if let Some(val) = arguments.get("frida_gadget") {
+        if as_bool("frida_gadget", val)? {
+            cfg.frida.gadget_enabled = true;
+        }
+    }
+    if let Some(port) = arguments.get("frida_gadget_port") {
+        cfg.frida.gadget_port = Some(as_u64("frida_gadget_port", port)? as u16);
+    }
+    if let Some(keep) = arguments.get("frida_gadget_keep") {
+        cfg.frida.gadget_keep_files = as_bool("frida_gadget_keep", keep)?;
+    }
+    if let Some(path) = arguments.get("frida_gadget_path") {
+        cfg.frida.gadget_library_path = Some(PathBuf::from(as_string("frida_gadget_path", path)?));
+    }
+    if let Some(path) = arguments.get("frida_gadget_config") {
+        cfg.frida.gadget_config_path = Some(PathBuf::from(as_string("frida_gadget_config", path)?));
+    }
+    if let Some(id) = arguments.get("frida_gadget_id") {
+        cfg.frida.gadget_id = Some(as_string("frida_gadget_id", id)?);
+    }
+
+    let implicit_frida = cfg.frida.remote.is_some()
+        || cfg.frida.use_usb
+        || cfg.frida.script_path.is_some()
+        || cfg.frida.gadget_enabled
+        || !cfg.frida.spawn
+        || !cfg.frida.resume_after_spawn;
+    if implicit_frida && cfg.dump_mode != DumpMode::Frida {
+        cfg.dump_mode = DumpMode::Frida;
+    }
+
     Ok(cfg)
+}
+
+#[cfg(feature = "frida")]
+fn gadget_config_from_args(arguments: &HashMap<String, Value>) -> Result<Config, McpError> {
+    let mut params = arguments.clone();
+    params
+        .entry("package".to_string())
+        .or_insert_with(|| Value::String("__gadget__".to_string()));
+    let mut cfg = config_from_args(&params)?;
+    cfg.dump_mode = DumpMode::Frida;
+    cfg.frida.gadget_enabled = true;
+    Ok(cfg)
+}
+
+fn dump_tool_schema(include_frida: bool) -> Value {
+    use serde_json::Map;
+
+    let mut properties = Map::new();
+    properties.insert("package".into(), json!({"type": "string"}));
+    properties.insert("wait_time".into(), json!({"type": "number"}));
+    properties.insert("out_dir".into(), json!({"type": "string"}));
+    properties.insert("dump_all".into(), json!({"type": "boolean"}));
+    properties.insert("fix_header".into(), json!({"type": "boolean"}));
+    properties.insert("scan_step".into(), json!({"type": "integer", "minimum": 1}));
+    properties.insert("min_size".into(), json!({"type": "integer", "minimum": 1}));
+    properties.insert("max_size".into(), json!({"type": "integer", "minimum": 1}));
+    properties.insert(
+        "min_dump_size".into(),
+        json!({"type": "integer", "minimum": 1}),
+    );
+    properties.insert("signal_trigger".into(), json!({"type": "boolean"}));
+    properties.insert("watch_maps".into(), json!({"type": "boolean"}));
+    properties.insert(
+        "stage_threshold".into(),
+        json!({"type": "integer", "minimum": 1}),
+    );
+    properties.insert(
+        "map_patterns".into(),
+        json!({
+            "oneOf": [
+                {"type": "string"},
+                {"type": "array", "items": {"type": "string"}}
+            ]
+        }),
+    );
+
+    if include_frida {
+        properties.insert(
+            "mode".into(),
+            json!({"type": "string", "enum": ["ptrace", "frida"]}),
+        );
+        properties.insert("frida".into(), json!({"type": "boolean"}));
+        properties.insert("frida_remote".into(), json!({"type": "string"}));
+        properties.insert("frida_usb".into(), json!({"type": "boolean"}));
+        properties.insert("frida_spawn".into(), json!({"type": "boolean"}));
+        properties.insert("frida_attach".into(), json!({"type": "boolean"}));
+        properties.insert("frida_no_resume".into(), json!({"type": "boolean"}));
+        properties.insert("frida_script".into(), json!({"type": "string"}));
+        properties.insert(
+            "frida_chunk".into(),
+            json!({"type": "integer", "minimum": 4096}),
+        );
+        properties.insert("frida_gadget".into(), json!({"type": "boolean"}));
+        properties.insert(
+            "frida_gadget_port".into(),
+            json!({"type": "integer", "minimum": 1, "maximum": 65535}),
+        );
+        properties.insert("frida_gadget_keep".into(), json!({"type": "boolean"}));
+        properties.insert("frida_gadget_path".into(), json!({"type": "string"}));
+        properties.insert("frida_gadget_config".into(), json!({"type": "string"}));
+        properties.insert("frida_gadget_id".into(), json!({"type": "string"}));
+    }
+
+    let mut schema = Map::new();
+    schema.insert("type".into(), json!("object"));
+    schema.insert("properties".into(), Value::Object(properties));
+    schema.insert("required".into(), json!(["package"]));
+
+    Value::Object(schema)
+}
+
+#[cfg(feature = "frida")]
+fn gadget_prepare_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "out_dir": {"type": "string"},
+            "frida_gadget_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+            "frida_gadget_keep": {"type": "boolean"},
+            "frida_gadget_path": {"type": "string"},
+            "frida_gadget_config": {"type": "string"}
+        }
+    })
+}
+
+#[cfg(feature = "frida")]
+fn gadget_inject_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "deployment_id": {"type": "string"},
+            "package": {"type": "string"},
+            "pid": {"type": "integer", "minimum": 1},
+            "timeout": {"type": "integer", "minimum": 1}
+        },
+        "required": ["deployment_id"]
+    })
+}
+
+#[cfg(feature = "frida")]
+fn gadget_cleanup_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "deployment_id": {"type": "string"}
+        },
+        "required": ["deployment_id"]
+    })
 }
 
 fn add_pattern(target: &mut Vec<String>, value: &str) {
@@ -744,6 +1266,7 @@ mod tests {
         },
     };
     use serde_json::{json, Value as JsonValue};
+    use std::path::PathBuf;
     use tokio::sync::{Mutex, RwLock};
     use tower::ServiceExt;
 
@@ -1094,6 +1617,54 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(captured.lock().await.is_some());
+    }
+
+    #[test]
+    fn schema_without_frida_does_not_include_mode() {
+        let schema = dump_tool_schema(false);
+        assert!(schema["properties"].get("package").is_some());
+        assert!(schema["properties"].get("mode").is_none());
+        assert!(schema["properties"].get("frida_remote").is_none());
+    }
+
+    #[test]
+    fn config_builder_supports_frida_mode() {
+        let mut args = HashMap::new();
+        args.insert("mode".to_string(), json!("frida"));
+        args.insert("frida_remote".to_string(), json!("127.0.0.1:27042"));
+        args.insert("frida_usb".to_string(), json!(true));
+        args.insert("frida_attach".to_string(), json!(true));
+        args.insert("frida_no_resume".to_string(), json!(true));
+        args.insert("frida_script".to_string(), json!("/tmp/agent.js"));
+        args.insert("frida_chunk".to_string(), json!(65536));
+        args.insert("frida_gadget".to_string(), json!(true));
+        args.insert("frida_gadget_port".to_string(), json!(34567));
+        args.insert("frida_gadget_keep".to_string(), json!(true));
+        args.insert("frida_gadget_path".to_string(), json!("/tmp/gadget.so"));
+        args.insert(
+            "frida_gadget_config".to_string(),
+            json!("/tmp/gadget.config"),
+        );
+
+        let cfg = config_from_args(&args).expect("parse config");
+        assert_eq!(cfg.dump_mode, DumpMode::Frida);
+        assert_eq!(cfg.frida.remote.as_deref(), Some("127.0.0.1:27042"));
+        assert!(cfg.frida.use_usb);
+        assert!(!cfg.frida.spawn);
+        assert!(!cfg.frida.resume_after_spawn);
+        assert_eq!(cfg.frida.script_path, Some(PathBuf::from("/tmp/agent.js")));
+        assert_eq!(cfg.frida.chunk_size, 65536);
+        assert!(cfg.frida.gadget_enabled);
+        assert_eq!(cfg.frida.gadget_port, Some(34_567));
+        assert!(cfg.frida.gadget_keep_files);
+        assert_eq!(
+            cfg.frida.gadget_library_path,
+            Some(PathBuf::from("/tmp/gadget.so"))
+        );
+        assert_eq!(
+            cfg.frida.gadget_config_path,
+            Some(PathBuf::from("/tmp/gadget.config"))
+        );
     }
 
     struct DummyTool {
