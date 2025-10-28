@@ -10,7 +10,7 @@ on:
       gadget_version:
         description: "Frida gadget release tag (e.g. 16.3.6)"
         required: false
-        default: "16.3.6"
+        default: "16.1.4"
 
 env:
   CARGO_TERM_COLOR: always
@@ -72,8 +72,8 @@ jobs:
           mkdir -p assets/frida/arm64
           url="https://github.com/frida/frida/releases/download/${VERSION}/frida-gadget-${VERSION}-android-arm64.so.xz"
           echo "Fetching $url"
-          curl -L "$url" -o gadget.so.xz
-          unxz -f gadget.so.xz
+          curl -L "$url" -o "frida-gadget-${VERSION}-android-arm64.so.xz"
+          unxz -f "frida-gadget-${VERSION}-android-arm64.so.xz"
           mv frida-gadget-${VERSION}-android-arm64.so assets/frida/arm64/frida-gadget.so
 
       - name: Commit updated gadget
