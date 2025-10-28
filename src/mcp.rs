@@ -98,50 +98,34 @@ async fn run_async(bind: String) -> Result<()> {
     )));
     {
         let guard = server.lock().await;
+        let generic_schema = dump_tool_schema(true);
         guard
             .add_tool(
                 "dump_dex".to_string(),
-                Some("Dump DEX/CDEX regions for a running package".to_string()),
-                json!({
-                        "type": "object",
-                        "properties": {
-                            "package": {"type": "string"},
-                            "wait_time": {"type": "number"},
-                            "out_dir": {"type": "string"},
-                            "dump_all": {"type": "boolean"},
-                            "fix_header": {"type": "boolean"},
-                            "scan_step": {"type": "integer", "minimum": 1},
-                            "min_size": {"type": "integer", "minimum": 1},
-                            "max_size": {"type": "integer", "minimum": 1},
-                            "min_dump_size": {"type": "integer", "minimum": 1},
-                            "signal_trigger": {"type": "boolean"},
-                            "watch_maps": {"type": "boolean"},
-                        "stage_threshold": {"type": "integer", "minimum": 1},
-                        "map_patterns": {
-                            "oneOf": [
-                                {"type": "string"},
-                                {"type": "array", "items": {"type": "string"}}
-                            ]
-                        },
-                        "mode": {
-                            "type": "string",
-                            "enum": ["ptrace", "frida"]
-                        },
-                        "frida": {"type": "boolean"},
-                        "frida_remote": {"type": "string"},
-                        "frida_usb": {"type": "boolean"},
-                        "frida_spawn": {"type": "boolean"},
-                        "frida_attach": {"type": "boolean"},
-                        "frida_no_resume": {"type": "boolean"},
-                        "frida_script": {"type": "string"},
-                        "frida_chunk": {"type": "integer", "minimum": 4096}
-                    },
-                    "required": ["package"],
-                }),
-                DumpTool::default(),
+                Some("Dump DEX/CDEX regions for a running package (auto mode)".to_string()),
+                generic_schema.clone(),
+                DumpTool::new(None),
             )
             .await
             .context("register dump_dex tool")?;
+        guard
+            .add_tool(
+                "dump_dex_ptrace".to_string(),
+                Some("Dump DEX/CDEX regions using ptrace scanning".to_string()),
+                dump_tool_schema(false),
+                DumpTool::new(Some(DumpMode::Ptrace)),
+            )
+            .await
+            .context("register dump_dex_ptrace tool")?;
+        guard
+            .add_tool(
+                "dump_dex_frida".to_string(),
+                Some("Dump DEX/CDEX regions via FRIDA hooks".to_string()),
+                generic_schema,
+                DumpTool::new(Some(DumpMode::Frida)),
+            )
+            .await
+            .context("register dump_dex_frida tool")?;
     }
 
     let state = AppState {
@@ -602,9 +586,9 @@ fn generate_session_id() -> String {
         .collect()
 }
 
-#[derive(Default)]
 struct DumpTool {
     lock: Mutex<()>,
+    forced_mode: Option<DumpMode>,
 }
 
 #[async_trait]
@@ -618,7 +602,10 @@ impl ToolHandler for DumpTool {
             .ok_or_else(|| McpError::validation("missing required string parameter `package`"))?
             .to_string();
 
-        let cfg = config_from_args(&arguments)?;
+        let mut cfg = config_from_args(&arguments)?;
+        if let Some(mode) = self.forced_mode {
+            cfg.dump_mode = mode;
+        }
         let result = task::spawn_blocking(move || run_dump_workflow(&package, &cfg))
             .await
             .map_err(|err| McpError::internal(format!("dump task join error: {err}")))?;
@@ -641,6 +628,21 @@ impl ToolHandler for DumpTool {
             structured_content: None,
             meta: None,
         })
+    }
+}
+
+impl DumpTool {
+    fn new(forced_mode: Option<DumpMode>) -> Self {
+        Self {
+            lock: Mutex::new(()),
+            forced_mode,
+        }
+    }
+}
+
+impl Default for DumpTool {
+    fn default() -> Self {
+        Self::new(None)
     }
 }
 
@@ -763,6 +765,64 @@ fn config_from_args(arguments: &HashMap<String, Value>) -> Result<Config, McpErr
     }
 
     Ok(cfg)
+}
+
+fn dump_tool_schema(include_frida: bool) -> Value {
+    use serde_json::Map;
+
+    let mut properties = Map::new();
+    properties.insert("package".into(), json!({"type": "string"}));
+    properties.insert("wait_time".into(), json!({"type": "number"}));
+    properties.insert("out_dir".into(), json!({"type": "string"}));
+    properties.insert("dump_all".into(), json!({"type": "boolean"}));
+    properties.insert("fix_header".into(), json!({"type": "boolean"}));
+    properties.insert("scan_step".into(), json!({"type": "integer", "minimum": 1}));
+    properties.insert("min_size".into(), json!({"type": "integer", "minimum": 1}));
+    properties.insert("max_size".into(), json!({"type": "integer", "minimum": 1}));
+    properties.insert(
+        "min_dump_size".into(),
+        json!({"type": "integer", "minimum": 1}),
+    );
+    properties.insert("signal_trigger".into(), json!({"type": "boolean"}));
+    properties.insert("watch_maps".into(), json!({"type": "boolean"}));
+    properties.insert(
+        "stage_threshold".into(),
+        json!({"type": "integer", "minimum": 1}),
+    );
+    properties.insert(
+        "map_patterns".into(),
+        json!({
+            "oneOf": [
+                {"type": "string"},
+                {"type": "array", "items": {"type": "string"}}
+            ]
+        }),
+    );
+
+    if include_frida {
+        properties.insert(
+            "mode".into(),
+            json!({"type": "string", "enum": ["ptrace", "frida"]}),
+        );
+        properties.insert("frida".into(), json!({"type": "boolean"}));
+        properties.insert("frida_remote".into(), json!({"type": "string"}));
+        properties.insert("frida_usb".into(), json!({"type": "boolean"}));
+        properties.insert("frida_spawn".into(), json!({"type": "boolean"}));
+        properties.insert("frida_attach".into(), json!({"type": "boolean"}));
+        properties.insert("frida_no_resume".into(), json!({"type": "boolean"}));
+        properties.insert("frida_script".into(), json!({"type": "string"}));
+        properties.insert(
+            "frida_chunk".into(),
+            json!({"type": "integer", "minimum": 4096}),
+        );
+    }
+
+    let mut schema = Map::new();
+    schema.insert("type".into(), json!("object"));
+    schema.insert("properties".into(), Value::Object(properties));
+    schema.insert("required".into(), json!(["package"]));
+
+    Value::Object(schema)
 }
 
 fn add_pattern(target: &mut Vec<String>, value: &str) {
@@ -1160,6 +1220,14 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(captured.lock().await.is_some());
+    }
+
+    #[test]
+    fn schema_without_frida_does_not_include_mode() {
+        let schema = dump_tool_schema(false);
+        assert!(schema["properties"].get("package").is_some());
+        assert!(schema["properties"].get("mode").is_none());
+        assert!(schema["properties"].get("frida_remote").is_none());
     }
 
     #[test]
