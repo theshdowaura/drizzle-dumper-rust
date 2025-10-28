@@ -20,7 +20,7 @@ futures-util = "0.3"
 tracing = "0.1"
 rand = "0.8"
 clap = { version = "4.5", features = ["derive"] }
-frida = { version = "0.18", optional = true }
+frida = { git = "https://github.com/frida/frida-rust", rev = "17.4.1", optional = true }
 goblin = { version = "0.9", optional = true }
 
 [dev-dependencies]
@@ -30,6 +30,10 @@ tower = "0.5"
 default = []
 frida = ["dep:frida", "dep:goblin"]
 frida-gadget-bundle = ["frida"]
+
+[patch.crates-io]
+frida = { git = "https://github.com/frida/frida-rust", rev = "17.4.1" }
+frida-sys = { git = "https://github.com/frida/frida-rust", rev = "17.4.1" }
 
 [profile.release]
 opt-level = "z"
