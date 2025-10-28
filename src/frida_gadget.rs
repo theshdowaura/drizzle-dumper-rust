@@ -17,7 +17,9 @@ use anyhow::{bail, Result};
 #[cfg(feature = "frida")]
 use rand::Rng;
 
-use crate::config::{Config, FridaConfig};
+use crate::config::Config;
+#[cfg(feature = "frida")]
+use crate::config::FridaConfig;
 
 #[cfg(feature = "frida")]
 pub struct GadgetDeployment {
@@ -196,6 +198,6 @@ pub fn prepare_gadget(_cfg: &Config) -> Result<()> {
 }
 
 #[cfg(not(feature = "frida"))]
-pub fn wait_for_gadget(_port: u16, _timeout: Duration) -> Result<()> {
+pub fn wait_for_gadget(_port: u16, _timeout: std::time::Duration) -> Result<()> {
     bail!("compile with `--features frida` to use gadget mode");
 }

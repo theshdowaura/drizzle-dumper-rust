@@ -39,13 +39,14 @@ use tokio::{
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::config::Config;
+use crate::config::{Config, DumpMode};
 #[cfg(feature = "frida")]
 use crate::frida_gadget::{prepare_gadget, wait_for_gadget, GadgetDeployment};
 #[cfg(feature = "frida")]
+use crate::ptrace::inject_library;
+#[cfg(feature = "frida")]
 use crate::workflow::{find_clone_thread, find_process_pid};
 
-use crate::config::{Config, DumpMode};
 use crate::workflow::run_dump_workflow;
 
 #[derive(Clone)]
