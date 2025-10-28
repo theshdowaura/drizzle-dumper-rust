@@ -19,6 +19,7 @@ tokio-stream = "0.1"
 futures-util = "0.3"
 tracing = "0.1"
 rand = "0.8"
+clap = { version = "4.5", features = ["derive"] }
 frida = { version = "0.17", optional = true }
 goblin = { version = "0.9", optional = true }
 
