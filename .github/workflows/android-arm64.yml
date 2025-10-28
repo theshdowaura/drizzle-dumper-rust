@@ -15,6 +15,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   ANDROID_API_LEVEL: 24
+  FRIDA_VERSION: 16.1.4
 
 jobs:
   build:
@@ -88,4 +89,15 @@ jobs:
           else
             git commit -m "Update Frida gadget ${VERSION}"
             git push
+          fi
+      - name: Download FRIDA core devkit
+        run: |
+          set -euo pipefail
+          curl -L "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-core-devkit-${FRIDA_VERSION}-android-arm64.tar.xz" -o frida-devkit.tar.xz
+          mkdir -p "$GITHUB_WORKSPACE/frida-devkit"
+          tar -xJf frida-devkit.tar.xz -C "$GITHUB_WORKSPACE/frida-devkit" --strip-components=1
+          rm frida-devkit.tar.xz
+          echo "FRIDA_CORE_DEVKIT=$GITHUB_WORKSPACE/frida-devkit" >> "$GITHUB_ENV"
+          if [ -d "$GITHUB_WORKSPACE/frida-devkit/lib/pkgconfig" ]; then
+            echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/frida-devkit/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
           fi
