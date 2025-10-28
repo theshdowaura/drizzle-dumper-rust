@@ -10,12 +10,13 @@ on:
       gadget_version:
         description: "Frida gadget release tag (e.g. 16.3.6)"
         required: false
-        default: "16.1.4"
+        default: "17.4.1"
 
 env:
   CARGO_TERM_COLOR: always
   ANDROID_API_LEVEL: 24
-  FRIDA_VERSION: 16.1.4
+  FRIDA_VERSION: 17.4.1
+  PKG_CONFIG_ALLOW_CROSS: "1"
 
 jobs:
   build:
@@ -45,6 +46,21 @@ jobs:
           echo "AR_aarch64_linux_android=${TOOLCHAIN_DIR}/llvm-ar" >> "$GITHUB_ENV"
           echo "CC_aarch64_linux_android=${TOOLCHAIN_DIR}/aarch64-linux-android${ANDROID_API_LEVEL}-clang" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${TOOLCHAIN_DIR}/aarch64-linux-android${ANDROID_API_LEVEL}-clang" >> "$GITHUB_ENV"
+
+      - name: Download FRIDA core devkit
+        run: |
+          set -euo pipefail
+          curl -L "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-core-devkit-${FRIDA_VERSION}-android-arm64.tar.xz" -o frida-devkit.tar.xz
+          mkdir -p "$GITHUB_WORKSPACE/frida-devkit"
+          tar -xJf frida-devkit.tar.xz -C "$GITHUB_WORKSPACE/frida-devkit" --strip-components=1
+          rm frida-devkit.tar.xz
+          echo "FRIDA_CORE_DEVKIT=$GITHUB_WORKSPACE/frida-devkit" >> "$GITHUB_ENV"
+          if [ -d "$GITHUB_WORKSPACE/frida-devkit/lib/pkgconfig" ]; then
+            echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/frida-devkit/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          fi
+          if [ -d "$GITHUB_WORKSPACE/frida-devkit/include" ]; then
+            echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=-I$GITHUB_WORKSPACE/frida-devkit/include" >> "$GITHUB_ENV"
+          fi
 
       - name: Build (aarch64-linux-android)
         run: cargo build --release --target aarch64-linux-android --features frida
@@ -89,15 +105,4 @@ jobs:
           else
             git commit -m "Update Frida gadget ${VERSION}"
             git push
-          fi
-      - name: Download FRIDA core devkit
-        run: |
-          set -euo pipefail
-          curl -L "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-core-devkit-${FRIDA_VERSION}-android-arm64.tar.xz" -o frida-devkit.tar.xz
-          mkdir -p "$GITHUB_WORKSPACE/frida-devkit"
-          tar -xJf frida-devkit.tar.xz -C "$GITHUB_WORKSPACE/frida-devkit" --strip-components=1
-          rm frida-devkit.tar.xz
-          echo "FRIDA_CORE_DEVKIT=$GITHUB_WORKSPACE/frida-devkit" >> "$GITHUB_ENV"
-          if [ -d "$GITHUB_WORKSPACE/frida-devkit/lib/pkgconfig" ]; then
-            echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/frida-devkit/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
           fi
