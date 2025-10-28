@@ -10,12 +10,12 @@ on:
       gadget_version:
         description: "Frida gadget release tag (e.g. 16.3.6)"
         required: false
-        default: "17.4.1"
+        default: "16.1.4"
 
 env:
   CARGO_TERM_COLOR: always
   ANDROID_API_LEVEL: 24
-  FRIDA_VERSION: 17.4.1
+  FRIDA_VERSION: 16.1.4
   PKG_CONFIG_ALLOW_CROSS: "1"
 
 jobs:

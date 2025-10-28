@@ -28,7 +28,7 @@ FRIDA Hook Mode
 
 FRIDA 模式通过 Hook `libart.so` 中的 `DexFile::OpenCommon` / `DexFile::OpenMemory` / `DexFile::DexFile` 等入口，实时截获 ART 装载的明文 DEX 并以块形式回传至宿主，由 Rust 侧完成去重、清单记录与可选的 header 修复。
 
-* 编译时需启用 `frida` feature：`cargo build --release --features frida`（交叉编译亦同）。默认仍会构建 ptrace 版本，未启用该 feature 时程序会提示“FRIDA 未启用”。若需将 gadget 一并打包，可额外开启 `frida-gadget-bundle` 并在 `assets/frida/arm64/` 放置 `frida-gadget.so`（GitHub Workflow 的手动触发现默认下载稳定版 `17.4.1`，也可自定义版本）。当前仓库通过 git 依赖直接锁定 `frida`/`frida-sys` 的 `17.4.1` 版本，首次构建会从 GitHub 拉取源码。
+* 编译时需启用 `frida` feature：`cargo build --release --features frida`（交叉编译亦同）。默认仍会构建 ptrace 版本，未启用该 feature 时程序会提示“FRIDA 未启用”。若需将 gadget 一并打包，可额外开启 `frida-gadget-bundle` 并在 `assets/frida/arm64/` 放置 `frida-gadget.so`（GitHub Workflow 的手动触发现默认下载稳定版 `16.1.4`，也可自定义版本）。当启用 `frida` feature 时，依赖的 `frida` crate 当前锁定在 crates.io 的 `0.17.x` 发行版。
 * 运行期需确保本机或远端已有 `frida-server`（通常以 root 权限运行）。`--frida-remote 127.0.0.1:27042` 可连接远端，`--frida-usb` 可优先选择 USB 设备。
 * 默认使用 `spawn` 冷启动目标；若需 attach 到已运行的进程使用 `--frida-attach`。如需在 dump 结束前保持暂停，可搭配 `--frida-no-resume`。
 * 注入脚本可自定义（`--frida-script <path>`），否则使用内置脚本，按需分块（`--frida-chunk`，默认 16 MiB）发送二进制数据，Rust 端会自动合并、去重、保存并更新 `dump_manifest.csv`。
@@ -56,7 +56,7 @@ GitHub Actions
 --------------
 
 仓库包含 `.github/workflows/android-arm64.yml`，可在 push/PR 时自动生成 `aarch64-linux-android` 版本，并作为构建产物上传。
-工作流会自动下载 `frida-core-devkit`（默认版本 `17.4.1`），设置 `FRIDA_CORE_DEVKIT`、`PKG_CONFIG_PATH`、`BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android` 等环境变量，并允许交叉 pkg-config，确保启用 `frida` feature 时能够找到头文件与库。构建过程中还会通过 git 依赖拉取 `frida-rust` 仓库的对应标签。
+工作流会自动下载 `frida-core-devkit`（默认版本 `16.1.4`），设置 `FRIDA_CORE_DEVKIT`、`PKG_CONFIG_PATH`、`BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android` 等环境变量，并允许交叉 pkg-config，确保启用 `frida` feature 时能够找到头文件与库。
 
 License
 -------
