@@ -3,13 +3,17 @@ use std::{fs, path::PathBuf, thread, time::Duration};
 use anyhow::{Context, Result};
 use procfs::process::{all_processes, MMapPath, MemoryMap, Process};
 
-use crate::config::Config;
+use crate::config::{Config, DumpMode};
 use crate::ptrace::try_dump_dex;
 use crate::signals::{
     clear_trigger_flag, install_sigusr1_handler, is_triggered, reset_trigger_flag,
 };
 
 pub fn run_dump_workflow(package_name: &str, cfg: &Config) -> Result<Vec<PathBuf>> {
+    if matches!(cfg.dump_mode, DumpMode::Frida) {
+        return crate::frida_hook::run_frida_workflow(package_name, cfg);
+    }
+
     println!(
         "[*]  Try to Find {}{}",
         package_name,

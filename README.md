@@ -18,6 +18,18 @@ drizzle_dumper <package_name> [wait_seconds] [options]
 * 默认轮询间隔为 0 秒，可通过 `wait_seconds` 指定轮询周期。
 * dump 成功后文件保存在 `/data/local/tmp/<package>_dumped_<addr>.dex`。
 * `--mcp-server` 启动符合 Streamable HTTP 规范的 MCP 服务器。远程调用可通过 MCP 会话调用工具，或直接 `POST /mcp/tools/dump` 传入 JSON（至少包含 `package`）。
+* 支持两种导出后端：默认 `ptrace` 扫描模式，以及 `--mode frida`（或 `--frida`）启用的 FRIDA Hook 模式。FRIDA 模式可搭配 `--frida-remote <host:port>`、`--frida-usb`、`--frida-attach`、`--frida-script <path>`、`--frida-chunk <bytes>` 等参数细化行为。
+
+FRIDA Hook Mode
+---------------
+
+FRIDA 模式通过 Hook `libart.so` 中的 `DexFile::OpenCommon` / `DexFile::OpenMemory` / `DexFile::DexFile` 等入口，实时截获 ART 装载的明文 DEX 并以块形式回传至宿主，由 Rust 侧完成去重、清单记录与可选的 header 修复。
+
+* 编译时需启用 `frida` feature：`cargo build --release --features frida`（交叉编译亦同）。默认仍会构建 ptrace 版本，未启用该 feature 时程序会提示“FRIDA 未启用”。
+* 运行期需确保本机或远端已有 `frida-server`（通常以 root 权限运行）。`--frida-remote 127.0.0.1:27042` 可连接远端，`--frida-usb` 可优先选择 USB 设备。
+* 默认使用 `spawn` 冷启动目标；若需 attach 到已运行的进程使用 `--frida-attach`。如需在 dump 结束前保持暂停，可搭配 `--frida-no-resume`。
+* 注入脚本可自定义（`--frida-script <path>`），否则使用内置脚本，按需分块（`--frida-chunk`，默认 16 MiB）发送二进制数据，Rust 端会自动合并、去重、保存并更新 `dump_manifest.csv`。
+* 所有 FRIDA 相关 MCP 参数与 CLI 参数保持一致，HTTP 请求体内可新增 `"mode": "frida"`、`"frida_remote"` 等字段直接切换后端。
 
 Build
 -----
@@ -32,6 +44,9 @@ export TOOLCHAIN_DIR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bi
 export CC_aarch64_linux_android="$TOOLCHAIN_DIR/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
 cargo build --release --target aarch64-linux-android
+
+# 启用 FRIDA hook（若需要）
+cargo build --release --target aarch64-linux-android --features frida
 ```
 
 GitHub Actions

@@ -39,7 +39,7 @@ use tokio::{
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::config::Config;
+use crate::config::{Config, DumpMode};
 use crate::workflow::run_dump_workflow;
 
 #[derive(Clone)]
@@ -103,26 +103,38 @@ async fn run_async(bind: String) -> Result<()> {
                 "dump_dex".to_string(),
                 Some("Dump DEX/CDEX regions for a running package".to_string()),
                 json!({
-                    "type": "object",
-                    "properties": {
-                        "package": {"type": "string"},
-                        "wait_time": {"type": "number"},
-                        "out_dir": {"type": "string"},
-                        "dump_all": {"type": "boolean"},
-                        "fix_header": {"type": "boolean"},
-                        "scan_step": {"type": "integer", "minimum": 1},
-                        "min_size": {"type": "integer", "minimum": 1},
-                        "max_size": {"type": "integer", "minimum": 1},
-                        "min_dump_size": {"type": "integer", "minimum": 1},
-                        "signal_trigger": {"type": "boolean"},
-                        "watch_maps": {"type": "boolean"},
+                        "type": "object",
+                        "properties": {
+                            "package": {"type": "string"},
+                            "wait_time": {"type": "number"},
+                            "out_dir": {"type": "string"},
+                            "dump_all": {"type": "boolean"},
+                            "fix_header": {"type": "boolean"},
+                            "scan_step": {"type": "integer", "minimum": 1},
+                            "min_size": {"type": "integer", "minimum": 1},
+                            "max_size": {"type": "integer", "minimum": 1},
+                            "min_dump_size": {"type": "integer", "minimum": 1},
+                            "signal_trigger": {"type": "boolean"},
+                            "watch_maps": {"type": "boolean"},
                         "stage_threshold": {"type": "integer", "minimum": 1},
                         "map_patterns": {
                             "oneOf": [
                                 {"type": "string"},
                                 {"type": "array", "items": {"type": "string"}}
                             ]
-                        }
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["ptrace", "frida"]
+                        },
+                        "frida": {"type": "boolean"},
+                        "frida_remote": {"type": "string"},
+                        "frida_usb": {"type": "boolean"},
+                        "frida_spawn": {"type": "boolean"},
+                        "frida_attach": {"type": "boolean"},
+                        "frida_no_resume": {"type": "boolean"},
+                        "frida_script": {"type": "string"},
+                        "frida_chunk": {"type": "integer", "minimum": 4096}
                     },
                     "required": ["package"],
                 }),
@@ -697,6 +709,59 @@ fn config_from_args(arguments: &HashMap<String, Value>) -> Result<Config, McpErr
         }
     }
 
+    if let Some(mode) = arguments.get("mode") {
+        let value = as_string("mode", mode)?;
+        match value.to_ascii_lowercase().as_str() {
+            "frida" => cfg.dump_mode = DumpMode::Frida,
+            "ptrace" => cfg.dump_mode = DumpMode::Ptrace,
+            other => {
+                return Err(McpError::validation(format!(
+                    "`mode` must be `ptrace` or `frida`, got {other}"
+                )))
+            }
+        }
+    }
+    if let Some(flag) = arguments.get("frida") {
+        if as_bool("frida", flag)? {
+            cfg.dump_mode = DumpMode::Frida;
+        }
+    }
+    if let Some(remote) = arguments.get("frida_remote") {
+        cfg.frida.remote = Some(as_string("frida_remote", remote)?);
+    }
+    if let Some(usb) = arguments.get("frida_usb") {
+        cfg.frida.use_usb = as_bool("frida_usb", usb)?;
+    }
+    if let Some(spawn) = arguments.get("frida_spawn") {
+        cfg.frida.spawn = as_bool("frida_spawn", spawn)?;
+    }
+    if let Some(attach) = arguments.get("frida_attach") {
+        if as_bool("frida_attach", attach)? {
+            cfg.frida.spawn = false;
+        }
+    }
+    if let Some(no_resume) = arguments.get("frida_no_resume") {
+        if as_bool("frida_no_resume", no_resume)? {
+            cfg.frida.resume_after_spawn = false;
+        }
+    }
+    if let Some(script) = arguments.get("frida_script") {
+        cfg.frida.script_path = Some(PathBuf::from(as_string("frida_script", script)?));
+    }
+    if let Some(chunk) = arguments.get("frida_chunk") {
+        let parsed = as_u64("frida_chunk", chunk)? as usize;
+        cfg.frida.chunk_size = parsed.max(4096);
+    }
+
+    let implicit_frida = cfg.frida.remote.is_some()
+        || cfg.frida.use_usb
+        || cfg.frida.script_path.is_some()
+        || !cfg.frida.spawn
+        || !cfg.frida.resume_after_spawn;
+    if implicit_frida && cfg.dump_mode != DumpMode::Frida {
+        cfg.dump_mode = DumpMode::Frida;
+    }
+
     Ok(cfg)
 }
 
@@ -744,6 +809,7 @@ mod tests {
         },
     };
     use serde_json::{json, Value as JsonValue};
+    use std::path::PathBuf;
     use tokio::sync::{Mutex, RwLock};
     use tower::ServiceExt;
 
@@ -1094,6 +1160,27 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(captured.lock().await.is_some());
+    }
+
+    #[test]
+    fn config_builder_supports_frida_mode() {
+        let mut args = HashMap::new();
+        args.insert("mode".to_string(), json!("frida"));
+        args.insert("frida_remote".to_string(), json!("127.0.0.1:27042"));
+        args.insert("frida_usb".to_string(), json!(true));
+        args.insert("frida_attach".to_string(), json!(true));
+        args.insert("frida_no_resume".to_string(), json!(true));
+        args.insert("frida_script".to_string(), json!("/tmp/agent.js"));
+        args.insert("frida_chunk".to_string(), json!(65536));
+
+        let cfg = config_from_args(&args).expect("parse config");
+        assert_eq!(cfg.dump_mode, DumpMode::Frida);
+        assert_eq!(cfg.frida.remote.as_deref(), Some("127.0.0.1:27042"));
+        assert!(cfg.frida.use_usb);
+        assert!(!cfg.frida.spawn);
+        assert!(!cfg.frida.resume_after_spawn);
+        assert_eq!(cfg.frida.script_path, Some(PathBuf::from("/tmp/agent.js")));
+        assert_eq!(cfg.frida.chunk_size, 65536);
     }
 
     struct DummyTool {
