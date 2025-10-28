@@ -56,6 +56,7 @@ GitHub Actions
 --------------
 
 仓库包含 `.github/workflows/android-arm64.yml`，可在 push/PR 时自动生成 `aarch64-linux-android` 版本，并作为构建产物上传。
+默认构建启用了 `frida` feature，发布包可直接使用 FRIDA 模式。
 
 License
 -------
