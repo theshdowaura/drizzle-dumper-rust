@@ -1,5 +1,7 @@
 mod guard;
 mod output;
+#[cfg(feature = "frida")]
+mod remote;
 mod scanner;
 
 use std::collections::HashSet;
@@ -12,6 +14,8 @@ use crate::config::Config;
 
 use guard::PtracedGuard;
 use output::{append_manifest, build_output_path, fix_dex_header, write_dump};
+#[cfg(feature = "frida")]
+pub use remote::inject_library;
 use scanner::{scan_region, MagicKind};
 
 pub fn try_dump_dex(package_name: &str, tid: i32, cfg: &Config) -> Result<Vec<PathBuf>> {

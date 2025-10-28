@@ -211,7 +211,7 @@ fn find_process_pid(package_name: &str) -> Result<Option<i32>> {
     Ok(None)
 }
 
-fn find_clone_thread(pid: i32) -> Result<Option<i32>> {
+pub(crate) fn find_clone_thread(pid: i32) -> Result<Option<i32>> {
     let mut max_tid: Option<i32> = None;
     let task_dir = format!("/proc/{pid}/task");
     for entry in fs::read_dir(&task_dir).with_context(|| format!("open {task_dir}"))? {

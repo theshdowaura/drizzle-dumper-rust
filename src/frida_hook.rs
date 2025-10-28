@@ -37,25 +37,86 @@ mod inner {
     use sha1::{Digest, Sha1};
 
     use crate::config::OUTPUT_SUFFIX;
-    use crate::workflow::find_process_pid;
+    use crate::frida_gadget::{prepare_gadget, wait_for_gadget, GadgetDeployment};
+    use crate::ptrace::inject_library;
+    use crate::workflow::{find_clone_thread, find_process_pid};
 
     use std::fs::{self, OpenOptions};
     use std::io::Write;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const WAIT_FOR_AGENT_READY: Duration = Duration::from_secs(20);
     const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(250);
     const QUIET_AFTER_COMPLETE: Duration = Duration::from_secs(3);
 
+    enum GadgetContext {
+        Managed(GadgetDeployment),
+        External {
+            library_path: PathBuf,
+            config_path: Option<PathBuf>,
+            port: u16,
+        },
+    }
+
+    impl GadgetContext {
+        fn library_path(&self) -> &Path {
+            match self {
+                GadgetContext::Managed(dep) => dep.library_path.as_path(),
+                GadgetContext::External { library_path, .. } => library_path.as_path(),
+            }
+        }
+
+        fn config_path(&self) -> Option<&Path> {
+            match self {
+                GadgetContext::Managed(dep) => Some(dep.config_path.as_path()),
+                GadgetContext::External { config_path, .. } => config_path.as_deref(),
+            }
+        }
+
+        fn port(&self) -> u16 {
+            match self {
+                GadgetContext::Managed(dep) => dep.port,
+                GadgetContext::External { port, .. } => *port,
+            }
+        }
+    }
+
     pub(super) fn run_frida_workflow(package_name: &str, cfg: &Config) -> Result<Vec<PathBuf>> {
         let frida_ctx = unsafe { Frida::obtain() };
         let manager = DeviceManager::obtain(&frida_ctx);
 
-        let device = select_device(&manager, cfg).context("select FRIDA device")?;
+        let mut gadget = if let Some(path) = cfg.frida.gadget_library_path.as_ref() {
+            let port = cfg
+                .frida
+                .gadget_port
+                .ok_or_else(|| anyhow!("frida gadget port required when using gadget id/path"))?;
+            Some(GadgetContext::External {
+                library_path: path.clone(),
+                config_path: cfg.frida.gadget_config_path.clone(),
+                port,
+            })
+        } else if cfg.frida.gadget_enabled && cfg.frida.remote.is_none() && !cfg.frida.use_usb {
+            Some(GadgetContext::Managed(prepare_gadget(cfg)?))
+        } else {
+            None
+        };
+
+        if cfg.frida.spawn && gadget.is_some() {
+            println!("[*]  FRIDA gadget mode operates in attach mode; ignoring --frida-spawn");
+        }
+
+        let spawn_mode = cfg.frida.spawn && gadget.is_none();
+        let device = if spawn_mode {
+            Some(select_device(&manager, cfg).context("select FRIDA device")?)
+        } else {
+            None
+        };
         let mut spawn_pid: Option<u32> = None;
-        let target_pid = if cfg.frida.spawn {
+        let target_pid = if spawn_mode {
             let options = SpawnOptions::default();
-            let pid = device
+            let dev = device.as_ref().expect("device for spawn");
+            let pid = dev
                 .spawn(package_name, &options)
                 .with_context(|| format!("spawn {package_name} via FRIDA"))?;
             spawn_pid = Some(pid);
@@ -66,6 +127,30 @@ mod inner {
             u32::try_from(pid).context("convert pid to u32")?
         };
         let pid_i32 = i32::try_from(target_pid).unwrap_or(i32::MAX);
+
+        if let Some(ctx) = gadget.as_ref() {
+            let tid = find_clone_thread(pid_i32)?
+                .ok_or_else(|| anyhow!("no thread found for gadget injection"))?;
+            let prev_env = std::env::var_os("FRIDA_GADGET_CONFIG");
+            if let Some(config) = ctx.config_path() {
+                std::env::set_var("FRIDA_GADGET_CONFIG", config);
+            }
+            inject_library(tid, ctx.library_path()).context("inject gadget library")?;
+            wait_for_gadget(ctx.port(), Duration::from_secs(10)).context("wait gadget listener")?;
+            match (ctx.config_path(), prev_env) {
+                (_, Some(prev)) => std::env::set_var("FRIDA_GADGET_CONFIG", prev),
+                (Some(_), None) => std::env::remove_var("FRIDA_GADGET_CONFIG"),
+                _ => {}
+            }
+        }
+
+        let device = match (device, gadget.as_ref()) {
+            (Some(existing), _) => existing,
+            (None, Some(ctx)) => manager
+                .add_remote_device(&format!("127.0.0.1:{}", ctx.port()))
+                .context("connect gadget device")?,
+            _ => unreachable!(),
+        };
 
         let session = device
             .attach(target_pid)

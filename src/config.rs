@@ -28,6 +28,18 @@ pub struct FridaConfig {
     pub script_path: Option<PathBuf>,
     /// Chunk size when streaming DEX payloads from the agent.
     pub chunk_size: usize,
+    /// Enable embedded gadget injection instead of relying on frida-server.
+    pub gadget_enabled: bool,
+    /// Optional port for the gadget listener.
+    pub gadget_port: Option<u16>,
+    /// Keep deployed gadget files after completion.
+    pub gadget_keep_files: bool,
+    /// Use an existing gadget shared object instead of embedded asset.
+    pub gadget_library_path: Option<PathBuf>,
+    /// Use an existing gadget config file instead of auto-generated one.
+    pub gadget_config_path: Option<PathBuf>,
+    /// Reference an already prepared gadget deployment (MCP managed).
+    pub gadget_id: Option<String>,
 }
 
 impl Default for FridaConfig {
@@ -39,6 +51,12 @@ impl Default for FridaConfig {
             resume_after_spawn: true,
             script_path: None,
             chunk_size: DEFAULT_FRIDA_CHUNK_SIZE,
+            gadget_enabled: false,
+            gadget_port: None,
+            gadget_keep_files: false,
+            gadget_library_path: None,
+            gadget_config_path: None,
+            gadget_id: None,
         }
     }
 }
@@ -205,6 +223,36 @@ pub fn parse_config_from_index(args: &[String], package_index: usize) -> Result<
                     i += 1;
                 }
             }
+            "--frida-gadget" => {
+                frida_cfg.gadget_enabled = true;
+            }
+            "--frida-gadget-port" => {
+                if let Some(value) = args.get(i + 1) {
+                    frida_cfg.gadget_port = value.parse::<u16>().ok();
+                    i += 1;
+                }
+            }
+            "--frida-gadget-keep" => {
+                frida_cfg.gadget_keep_files = true;
+            }
+            "--frida-gadget-path" => {
+                if let Some(value) = args.get(i + 1) {
+                    frida_cfg.gadget_library_path = Some(PathBuf::from(value));
+                    i += 1;
+                }
+            }
+            "--frida-gadget-config" => {
+                if let Some(value) = args.get(i + 1) {
+                    frida_cfg.gadget_config_path = Some(PathBuf::from(value));
+                    i += 1;
+                }
+            }
+            "--frida-gadget-id" => {
+                if let Some(value) = args.get(i + 1) {
+                    frida_cfg.gadget_id = Some(value.to_string());
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -241,6 +289,12 @@ pub fn print_usage() {
          [*]    --frida-no-resume        Do not resume the process after spawning\n\
          [*]    --frida-script <path>    Provide custom FRIDA agent JS script\n\
          [*]    --frida-chunk <bytes>    Chunk size when streaming DEX payloads (default 16MiB)\n\
+         [*]    --frida-gadget           Inject FRIDA Gadget (no frida-server required)\n\
+         [*]    --frida-gadget-port <n>  Override gadget listen port (default random)\n\
+         [*]    --frida-gadget-keep      Keep gadget files on disk after dumping\n\
+         [*]    --frida-gadget-path <so> Supply custom gadget shared object\n\
+         [*]    --frida-gadget-config <file> Supply custom gadget config JSON\n\
+         [*]    --frida-gadget-id <id>   Use gadget prepared via MCP (overrides paths/port)\n\
          [*]  Example:\n\
          [*]    ./drizzleDumper com.foo.bar 0.5 --dump-all --fix-header --out /sdcard/dumps\n\
          [*]  If success, you can find the dex file in the output directory.\n\
@@ -331,6 +385,21 @@ mod tests {
         );
         assert_eq!(remote.frida.script_path, expected.frida.script_path);
         assert_eq!(remote.frida.chunk_size, expected.frida.chunk_size);
+        assert_eq!(remote.frida.gadget_enabled, expected.frida.gadget_enabled);
+        assert_eq!(remote.frida.gadget_port, expected.frida.gadget_port);
+        assert_eq!(
+            remote.frida.gadget_keep_files,
+            expected.frida.gadget_keep_files
+        );
+        assert_eq!(
+            remote.frida.gadget_library_path,
+            expected.frida.gadget_library_path
+        );
+        assert_eq!(
+            remote.frida.gadget_config_path,
+            expected.frida.gadget_config_path
+        );
+        assert_eq!(remote.frida.gadget_id, expected.frida.gadget_id);
     }
 
     #[test]
@@ -349,6 +418,16 @@ mod tests {
             "/tmp/script.js",
             "--frida-chunk",
             "1048576",
+            "--frida-gadget",
+            "--frida-gadget-port",
+            "34567",
+            "--frida-gadget-keep",
+            "--frida-gadget-path",
+            "/tmp/gadget.so",
+            "--frida-gadget-config",
+            "/tmp/gadget.config",
+            "--frida-gadget-id",
+            "demo-id",
         ]);
 
         let cfg = parse_config(&args).unwrap();
@@ -359,5 +438,17 @@ mod tests {
         assert!(!cfg.frida.resume_after_spawn);
         assert_eq!(cfg.frida.script_path, Some(PathBuf::from("/tmp/script.js")));
         assert_eq!(cfg.frida.chunk_size, 1_048_576);
+        assert!(cfg.frida.gadget_enabled);
+        assert_eq!(cfg.frida.gadget_port, Some(34_567));
+        assert!(cfg.frida.gadget_keep_files);
+        assert_eq!(
+            cfg.frida.gadget_library_path,
+            Some(PathBuf::from("/tmp/gadget.so"))
+        );
+        assert_eq!(
+            cfg.frida.gadget_config_path,
+            Some(PathBuf::from("/tmp/gadget.config"))
+        );
+        assert_eq!(cfg.frida.gadget_id.as_deref(), Some("demo-id"));
     }
 }

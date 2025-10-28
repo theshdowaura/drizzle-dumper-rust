@@ -20,13 +20,15 @@ futures-util = "0.3"
 tracing = "0.1"
 rand = "0.8"
 frida = { version = "0.17", optional = true }
+goblin = { version = "0.9", optional = true }
 
 [dev-dependencies]
 tower = "0.5"
 
 [features]
 default = []
-frida = ["dep:frida"]
+frida = ["dep:frida", "dep:goblin"]
+frida-gadget-bundle = ["frida"]
 
 [profile.release]
 opt-level = "z"
