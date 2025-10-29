@@ -117,13 +117,10 @@ fn materialize_library(cfg: &FridaConfig, target: &Path) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(bytes) = embedded::gadget_blob()? {
-        let mut file = File::create(target)?;
-        file.write_all(bytes)?;
-        Ok(())
-    } else {
-        bail!("no gadget asset embedded; provide --frida-gadget-path <so>");
-    }
+    let bytes = embedded::gadget_blob()?;
+    let mut file = File::create(target)?;
+    file.write_all(bytes)?;
+    Ok(())
 }
 
 #[cfg(feature = "frida")]

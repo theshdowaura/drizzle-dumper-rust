@@ -147,7 +147,7 @@ mod inner {
         let device = match (device, gadget.as_ref()) {
             (Some(existing), _) => existing,
             (None, Some(ctx)) => manager
-                .add_remote_device(&format!("127.0.0.1:{}", ctx.port()))
+                .get_remote_device(&format!("127.0.0.1:{}", ctx.port()))
                 .context("connect gadget device")?,
             _ => unreachable!(),
         };
@@ -246,7 +246,7 @@ mod inner {
                 .with_context(|| format!("connect remote device {remote}"));
         }
         if cfg.frida.use_usb {
-            if let Ok(device) = manager.get_device_by_type(DeviceType::Usb) {
+            if let Ok(device) = manager.get_device_by_type(DeviceType::USB) {
                 return Ok(device);
             }
         }
@@ -265,13 +265,15 @@ mod inner {
                 Message::Send(payload) => self.handle_send(payload, data),
                 Message::Log(log) => {
                     let level = format!("{:?}", log.level);
-                    let msg = log.payload.clone().unwrap_or_default();
+                    let msg = log.payload.clone();
                     self.sender.send(AgentEvent::Log {
                         level,
                         message: msg,
                     })
                 }
-                Message::Error(err) => self.sender.send(AgentEvent::AgentError(err.text.clone())),
+                Message::Error(err) => self
+                    .sender
+                    .send(AgentEvent::AgentError(err.description.clone())),
                 Message::Other(value) => self.sender.send(AgentEvent::AgentError(format!(
                     "unexpected message: {value}"
                 ))),
@@ -285,7 +287,7 @@ mod inner {
             payload: &MessageSend,
             data: Option<Vec<u8>>,
         ) -> Result<(), mpsc::SendError<AgentEvent>> {
-            let json = payload.returns.clone();
+            let json = payload.payload.returns.clone();
             match serde_json::from_value::<AgentPayload>(json) {
                 Ok(agent_payload) => self.route_agent_payload(agent_payload, data),
                 Err(err) => self.sender.send(AgentEvent::AgentError(format!(
@@ -489,7 +491,7 @@ mod inner {
         fn ingest_chunk(&mut self, chunk: DexChunk) -> Result<()> {
             let entry = self.assemblies.entry(chunk.key.clone());
             let assembly = match entry {
-                Entry::Occupied(mut occ) => occ.get_mut(),
+                Entry::Occupied(occ) => occ.into_mut(),
                 Entry::Vacant(vac) => {
                     let assembly = DexAssembly::new(
                         &chunk.key,

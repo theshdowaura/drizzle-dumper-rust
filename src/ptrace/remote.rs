@@ -8,6 +8,7 @@ mod imp {
     use std::io::{Read, Seek, SeekFrom, Write};
 
     use goblin::elf::Elf;
+    use nix::libc;
     use nix::sys::ptrace;
     use nix::sys::wait::{waitpid, WaitStatus};
     use nix::unistd::Pid;

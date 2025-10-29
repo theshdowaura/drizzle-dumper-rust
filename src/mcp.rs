@@ -7,7 +7,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use axum::{
     body::{Body, Bytes},
@@ -864,7 +864,7 @@ impl ToolHandler for InjectGadgetTool {
         let config_path = info.config_path.clone();
         let port = info.port;
         let package_for_spawn = package_arg.clone();
-        let result = task::spawn_blocking(move || -> Result<()> {
+        let join_result = task::spawn_blocking(move || -> Result<()> {
             let pid = if let Some(pid) = pid_arg {
                 pid as i32
             } else {
@@ -891,7 +891,10 @@ impl ToolHandler for InjectGadgetTool {
             Ok(())
         })
         .await
-        .map_err(|err| McpError::internal(format!("inject gadget task failed: {err}")))??;
+        .map_err(|err| McpError::internal(format!("inject gadget task failed: {err}")))?;
+
+        join_result
+            .map_err(|err| McpError::internal(format!("inject gadget task failed: {err}")))?;
 
         let target_desc = package_arg
             .as_deref()
