@@ -7,6 +7,7 @@ mod imp {
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
 
+    use anyhow::anyhow;
     use goblin::elf::{note::NT_PRSTATUS, Elf};
     use nix::libc;
     use nix::sys::ptrace;
