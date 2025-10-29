@@ -1,7 +1,7 @@
 #[cfg(feature = "frida")]
 use std::fs::{self, File};
 #[cfg(feature = "frida")]
-use std::io::{Read, Write};
+use std::io::Write;
 #[cfg(feature = "frida")]
 use std::net::{IpAddr, Ipv4Addr, TcpStream};
 #[cfg(feature = "frida")]
@@ -117,13 +117,10 @@ fn materialize_library(cfg: &FridaConfig, target: &Path) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(bytes) = embedded::gadget_blob()? {
-        let mut file = File::create(target)?;
-        file.write_all(bytes)?;
-        Ok(())
-    } else {
-        bail!("no gadget asset embedded; provide --frida-gadget-path <so>");
-    }
+    let bytes = embedded::gadget_blob()?;
+    let mut file = File::create(target)?;
+    file.write_all(bytes)?;
+    Ok(())
 }
 
 #[cfg(feature = "frida")]
@@ -174,7 +171,7 @@ mod embedded {
         {
             Ok(include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/assets/frida/arm64/libfrida-gadget.so"
+                "/assets/frida/arm64/frida-gadget.so"
             )))
         }
 

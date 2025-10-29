@@ -15,6 +15,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   ANDROID_API_LEVEL: 24
+  FRIDA_VERSION: 16.1.4
+  PKG_CONFIG_ALLOW_CROSS: "1"
 
 jobs:
   build:
@@ -39,20 +41,55 @@ jobs:
 
       - name: Configure Android toolchain env
         run: |
-          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
-          TOOLCHAIN_DIR="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          echo "AR_aarch64_linux_android=${TOOLCHAIN_DIR}/llvm-ar" >> "$GITHUB_ENV"
-          echo "CC_aarch64_linux_android=${TOOLCHAIN_DIR}/aarch64-linux-android${ANDROID_API_LEVEL}-clang" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${TOOLCHAIN_DIR}/aarch64-linux-android${ANDROID_API_LEVEL}-clang" >> "$GITHUB_ENV"
+          ndk="${{ steps.setup-ndk.outputs.ndk-path }}"
+          target_api="${ANDROID_API_LEVEL:-24}"
+          sysroot="$ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          toolchain_bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ndk" >> "$GITHUB_ENV"
+          echo "NDK_SYSROOT=$sysroot" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=${toolchain_bin}/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=${toolchain_bin}/llvm-ar" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=${toolchain_bin}/aarch64-linux-android${target_api}-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${toolchain_bin}/aarch64-linux-android${target_api}-clang" >> "$GITHUB_ENV"
+
+          BCA_ARGS="--target=aarch64-linux-android${target_api} --sysroot=$sysroot -I$sysroot/usr/include -I$sysroot/usr/include/aarch64-linux-android -D__ANDROID_API__=${target_api}"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=$BCA_ARGS" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android=$BCA_ARGS" >> "$GITHUB_ENV"
+
+      - name: Download FRIDA core devkit
+        run: |
+          set -euo pipefail
+          curl -L "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-core-devkit-${FRIDA_VERSION}-android-arm64.tar.xz" -o frida-devkit.tar.xz
+          mkdir -p "$GITHUB_WORKSPACE/frida-devkit"
+          tar -xJf frida-devkit.tar.xz -C "$GITHUB_WORKSPACE/frida-devkit" --strip-components=1
+          rm frida-devkit.tar.xz
+          echo "FRIDA_CORE_DEVKIT=$GITHUB_WORKSPACE/frida-devkit" >> "$GITHUB_ENV"
+          if [ -d "$GITHUB_WORKSPACE/frida-devkit/lib/pkgconfig" ]; then
+            echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/frida-devkit/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          fi
+          if [ -d "$GITHUB_WORKSPACE/frida-devkit/include" ]; then
+            echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=-I$GITHUB_WORKSPACE/frida-devkit/include" >> "$GITHUB_ENV"
+          fi
 
       - name: Build (aarch64-linux-android)
-        run: cargo build --release --target aarch64-linux-android
+        run: cargo build --release --target aarch64-linux-android --features frida,frida-gadget-bundle
+
+      - name: Assemble artifact bundle
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/aarch64-linux-android/release/drizzle_dumper dist/
+          if [ -f assets/frida/arm64/frida-gadget.so ]; then
+            cp assets/frida/arm64/frida-gadget.so dist/
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: drizzle-dumper-android-arm64
-          path: target/aarch64-linux-android/release/drizzle_dumper
+          path: dist/
 
   prepare-gadget:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.gadget_version != ''
