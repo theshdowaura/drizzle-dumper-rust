@@ -686,14 +686,36 @@ impl ToolHandler for DumpTool {
                 cfg.frida.gadget_keep_files = keep;
             }
         }
-        let result = task::spawn_blocking(move || run_dump_workflow(&package, &cfg))
-            .await
-            .map_err(|err| McpError::internal(format!("dump task join error: {err}")))?;
-
         let dump_mode_label = match cfg.dump_mode {
             DumpMode::Ptrace => "ptrace",
             DumpMode::Frida => "frida",
         };
+        #[cfg(feature = "frida")]
+        let frida_snapshot = if dump_mode_label == "frida" {
+            Some(json!({
+                "remote": cfg.frida.remote.clone(),
+                "usb": cfg.frida.use_usb,
+                "spawn": cfg.frida.spawn,
+                "script_path": cfg.frida.script_path.as_ref().map(|p| p.display().to_string()),
+                "chunk_size": cfg.frida.chunk_size,
+                "gadget": {
+                    "enabled": cfg.frida.gadget_enabled,
+                    "port": cfg.frida.gadget_port,
+                    "keep_files": cfg.frida.gadget_keep_files,
+                    "library_path": cfg.frida.gadget_library_path.as_ref().map(|p| p.display().to_string()),
+                    "config_path": cfg.frida.gadget_config_path.as_ref().map(|p| p.display().to_string()),
+                    "deployment_id": cfg.frida.gadget_id.clone()
+                }
+            }))
+        } else {
+            None
+        };
+
+        let cfg_for_run = cfg.clone();
+        let result = task::spawn_blocking(move || run_dump_workflow(&package, &cfg_for_run))
+            .await
+            .map_err(|err| McpError::internal(format!("dump task join error: {err}")))?;
+
         let dumps = result.map_err(|err| McpError::internal(err.to_string()))?;
         let files: Vec<String> = dumps.iter().map(|p| p.display().to_string()).collect();
         let count = files.len();
@@ -712,21 +734,7 @@ impl ToolHandler for DumpTool {
         #[cfg(feature = "frida")]
         {
             if dump_mode_label == "frida" {
-                structured["frida"] = json!({
-                    "remote": cfg.frida.remote,
-                    "usb": cfg.frida.use_usb,
-                    "spawn": cfg.frida.spawn,
-                    "script_path": cfg.frida.script_path.as_ref().map(|p| p.display().to_string()),
-                    "chunk_size": cfg.frida.chunk_size,
-                    "gadget": {
-                        "enabled": cfg.frida.gadget_enabled,
-                        "port": cfg.frida.gadget_port,
-                        "keep_files": cfg.frida.gadget_keep_files,
-                        "library_path": cfg.frida.gadget_library_path.as_ref().map(|p| p.display().to_string()),
-                        "config_path": cfg.frida.gadget_config_path.as_ref().map(|p| p.display().to_string()),
-                        "deployment_id": cfg.frida.gadget_id.clone()
-                    }
-                });
+                structured["frida"] = frida_snapshot.unwrap_or(Value::Null);
             }
         }
 
