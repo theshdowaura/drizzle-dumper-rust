@@ -896,7 +896,7 @@ impl ToolHandler for InjectGadgetTool {
         let config_path = info.config_path.clone();
         let port = info.port;
         let package_for_lookup = package_arg.clone();
-        let join_result = task::spawn_blocking(move || -> Result<()> {
+        let join_result = task::spawn_blocking(move || -> Result<i32> {
             let pid = if let Some(pid) = pid_arg {
                 pid as i32
             } else {
@@ -922,18 +922,18 @@ impl ToolHandler for InjectGadgetTool {
                 _ => {}
             }
 
-            Ok(())
+            Ok(pid)
         })
         .await
         .map_err(|err| McpError::internal(format!("inject gadget task failed: {err}")))?;
 
-        join_result
+        let target_pid = join_result
             .map_err(|err| McpError::internal(format!("inject gadget task failed: {err}")))?;
 
         let target_desc = package_arg
             .as_deref()
             .map(|p| p.to_string())
-            .unwrap_or_else(|| format!("pid {}", pid_arg.unwrap()));
+            .unwrap_or_else(|| format!("pid {}", target_pid));
 
         Ok(ToolResult {
             content: vec![Content::text(format!(
