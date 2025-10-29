@@ -895,12 +895,14 @@ impl ToolHandler for InjectGadgetTool {
         let library_path = info.library_path.clone();
         let config_path = info.config_path.clone();
         let port = info.port;
-        let package_for_spawn = package_arg.clone();
+        let package_for_lookup = package_arg.clone();
         let join_result = task::spawn_blocking(move || -> Result<()> {
             let pid = if let Some(pid) = pid_arg {
                 pid as i32
             } else {
-                let package = package_for_spawn.as_deref().unwrap();
+                let package = package_for_lookup
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("`package` or `pid` required"))?;
                 find_process_pid(package)?.ok_or_else(|| anyhow!("process {package} not found"))?
             };
             let tid =
