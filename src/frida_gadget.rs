@@ -171,7 +171,7 @@ mod embedded {
         {
             Ok(include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/assets/frida/arm64/libfrida-gadget.so"
+                "/assets/frida/arm64/frida-gadget.so"
             )))
         }
 

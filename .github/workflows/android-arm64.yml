@@ -81,8 +81,8 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp target/aarch64-linux-android/release/drizzle_dumper dist/
-          if [ -f assets/frida/arm64/libfrida-gadget.so ]; then
-            cp assets/frida/arm64/libfrida-gadget.so dist/
+          if [ -f assets/frida/arm64/frida-gadget.so ]; then
+            cp assets/frida/arm64/frida-gadget.so dist/
           fi
 
       - name: Upload artifact
@@ -111,7 +111,7 @@ jobs:
           echo "Fetching $url"
           curl -L "$url" -o "frida-gadget-${VERSION}-android-arm64.so.xz"
           unxz -f "frida-gadget-${VERSION}-android-arm64.so.xz"
-          mv frida-gadget-${VERSION}-android-arm64.so assets/frida/arm64/libfrida-gadget.so
+          mv frida-gadget-${VERSION}-android-arm64.so assets/frida/arm64/frida-gadget.so
 
       - name: Commit updated gadget
         env:
