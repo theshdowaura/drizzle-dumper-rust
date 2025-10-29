@@ -1,3 +1,5 @@
+#[cfg(all(target_arch = "aarch64", target_os = "android"))]
+mod clear_cache;
 pub mod cli;
 pub mod config;
 pub mod frida_gadget;

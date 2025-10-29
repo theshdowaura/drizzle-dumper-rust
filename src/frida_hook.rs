@@ -151,7 +151,9 @@ mod inner {
             (None, Some(ctx)) => manager
                 .get_remote_device(&format!("127.0.0.1:{}", ctx.port()))
                 .context("connect gadget device")?,
-            (None, None) => select_device(&manager, cfg).context("select FRIDA device for attach")?,
+            (None, None) => {
+                select_device(&manager, cfg).context("select FRIDA device for attach")?
+            }
         };
 
         let session = device
@@ -328,6 +330,7 @@ mod inner {
                     symbol: payload.symbol,
                     location: payload.location,
                     magic: payload.magic,
+                    reported: payload.reported,
                 })),
                 "hook-error" => self
                     .sender
@@ -382,6 +385,7 @@ mod inner {
         symbol: Option<String>,
         location: Option<String>,
         magic: Option<String>,
+        reported: Option<u64>,
     }
 
     struct DexAssembly {
@@ -435,12 +439,47 @@ mod inner {
             Ok(())
         }
 
+        fn merge_chunk_meta(&mut self, chunk: &DexChunk) {
+            if self.symbol.is_none() {
+                self.symbol = chunk.symbol.clone();
+            }
+            if self.location.is_none() {
+                self.location = chunk.location.clone();
+            }
+            if self.magic.is_none() {
+                self.magic = chunk.magic.clone();
+            }
+            if self.reported.is_none() && chunk.size > 0 {
+                self.reported = Some(chunk.size);
+            }
+        }
+
+        fn merge_complete_meta(&mut self, complete: &DexComplete) {
+            if self.symbol.is_none() {
+                self.symbol = complete.symbol.clone();
+            }
+            if self.location.is_none() {
+                self.location = complete.location.clone();
+            }
+            if self.magic.is_none() {
+                self.magic = complete.magic.clone();
+            }
+            if complete.size > 0 {
+                self.reported = Some(complete.size);
+            }
+            if let Some(reported) = complete.reported {
+                self.reported = Some(reported);
+            }
+        }
+
         fn complete(mut self, package: &str, cfg: &Config, pid: i32) -> Result<Option<PathBuf>> {
             if self.received == 0 {
                 return Ok(None);
             }
             self.buffer.truncate(self.received);
-            let kind = detect_dex_kind(&self.buffer).ok_or_else(|| anyhow!("unknown dex magic"))?;
+            let kind = detect_dex_kind(&self.buffer)
+                .or_else(|| self.magic.as_deref().and_then(DexKind::from_magic))
+                .ok_or_else(|| anyhow!("unknown dex magic"))?;
             if cfg.fix_header && matches!(kind, DexKind::Dex) && self.buffer.len() == self.expected
             {
                 fix_dex_header(&mut self.buffer);
@@ -469,6 +508,16 @@ mod inner {
     enum DexKind {
         Dex,
         Cdex,
+    }
+
+    impl DexKind {
+        fn from_magic(magic: &str) -> Option<Self> {
+            match magic {
+                "dex\n" => Some(DexKind::Dex),
+                "cdex" => Some(DexKind::Cdex),
+                _ => None,
+            }
+        }
     }
 
     struct DexAggregator<'a> {
@@ -505,11 +554,13 @@ mod inner {
                     vac.insert(assembly)
                 }
             };
+            assembly.merge_chunk_meta(&chunk);
             assembly.ingest(chunk.offset, chunk.data)
         }
 
         fn complete(&mut self, complete: DexComplete) -> Result<Option<PathBuf>> {
-            if let Some(assembly) = self.assemblies.remove(&complete.key) {
+            if let Some(mut assembly) = self.assemblies.remove(&complete.key) {
+                assembly.merge_complete_meta(&complete);
                 if let Some(path) = assembly.complete(self.package, self.cfg, self.pid)? {
                     self.outputs.push(path.clone());
                     return Ok(Some(path));

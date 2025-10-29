@@ -53,8 +53,6 @@ use crate::workflow::run_dump_workflow;
 struct AppState {
     server: Arc<Mutex<McpServer>>,
     sessions: Arc<RwLock<HashMap<String, Arc<SessionHandle>>>>,
-    #[cfg(feature = "frida")]
-    gadgets: Arc<Mutex<HashMap<String, GadgetDeployment>>>,
 }
 
 struct SessionHandle {
@@ -189,8 +187,6 @@ async fn run_async(bind: String) -> Result<()> {
     let state = AppState {
         server: server.clone(),
         sessions: Arc::new(RwLock::new(HashMap::new())),
-        #[cfg(feature = "frida")]
-        gadgets: gadget_registry.clone(),
     };
 
     let app = build_router(state);

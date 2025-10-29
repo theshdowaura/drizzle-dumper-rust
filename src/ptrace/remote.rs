@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 
 #[cfg(target_arch = "aarch64")]
@@ -93,7 +93,7 @@ mod imp {
         fn write_cstring(&mut self, path: &Path) -> Result<u64> {
             let bytes = path
                 .to_str()
-                .ok_or_else(|| anyhow::anyhow!("library path must be utf-8"))?
+                .ok_or_else(|| anyhow!("library path must be utf-8"))?
                 .as_bytes();
             let len = bytes.len() + 1;
 
@@ -161,7 +161,7 @@ mod imp {
                 return Ok(addr);
             }
         }
-        Err(anyhow::anyhow!("symbol {symbol} not found in {hint}"))
+        Err(anyhow!("symbol {symbol} not found in {hint}"))
     }
 
     #[repr(C)]
