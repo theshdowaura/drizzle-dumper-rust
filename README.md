@@ -42,15 +42,24 @@ Build
 ```
 rustup target add aarch64-linux-android
 export ANDROID_NDK_HOME=/path/to/android-ndk-r26d
+export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
 export ANDROID_API_LEVEL=24
+export NDK_SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 export TOOLCHAIN_DIR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
 export CC_aarch64_linux_android="$TOOLCHAIN_DIR/aarch64-linux-android${ANDROID_API_LEVEL}-clang"
+export AR_aarch64_linux_android="$TOOLCHAIN_DIR/llvm-ar"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$AR_aarch64_linux_android"
+export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--target=aarch64-linux-android${ANDROID_API_LEVEL} --sysroot=$NDK_SYSROOT -I$NDK_SYSROOT/usr/include -I$NDK_SYSROOT/usr/include/aarch64-linux-android -D__ANDROID_API__=${ANDROID_API_LEVEL}"
+export BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android="$BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android"
+export PKG_CONFIG_ALLOW_CROSS=1
 cargo build --release --target aarch64-linux-android
 
 # 启用 FRIDA hook（若需要）
 cargo build --release --target aarch64-linux-android --features frida
 ```
+
+> 提示：`BINDGEN_EXTRA_CLANG_ARGS_*` 环境变量会让 `bindgen` 使用 NDK sysroot 及 `aarch64-linux-android` 头文件，避免误引用宿主机的 glibc 头文件。
 
 GitHub Actions
 --------------
