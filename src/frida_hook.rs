@@ -86,7 +86,7 @@ mod inner {
         let frida_ctx = unsafe { Frida::obtain() };
         let manager = DeviceManager::obtain(&frida_ctx);
 
-        let mut gadget = if let Some(path) = cfg.frida.gadget_library_path.as_ref() {
+        let gadget = if let Some(path) = cfg.frida.gadget_library_path.as_ref() {
             let port = cfg
                 .frida
                 .gadget_port
@@ -107,7 +107,7 @@ mod inner {
         }
 
         let spawn_mode = cfg.frida.spawn && gadget.is_none();
-        let device = if spawn_mode {
+        let mut device_opt = if gadget.is_none() {
             Some(select_device(&manager, cfg).context("select FRIDA device")?)
         } else {
             None
@@ -115,7 +115,9 @@ mod inner {
         let mut spawn_pid: Option<u32> = None;
         let target_pid = if spawn_mode {
             let options = SpawnOptions::default();
-            let dev = device.as_ref().expect("device for spawn");
+            let dev = device_opt
+                .as_mut()
+                .expect("device selection must succeed for spawn mode");
             let pid = dev
                 .spawn(package_name, &options)
                 .with_context(|| format!("spawn {package_name} via FRIDA"))?;
@@ -144,12 +146,12 @@ mod inner {
             }
         }
 
-        let device = match (device, gadget.as_ref()) {
+        let device = match (device_opt, gadget.as_ref()) {
             (Some(existing), _) => existing,
             (None, Some(ctx)) => manager
                 .get_remote_device(&format!("127.0.0.1:{}", ctx.port()))
                 .context("connect gadget device")?,
-            _ => unreachable!(),
+            (None, None) => select_device(&manager, cfg).context("select FRIDA device for attach")?,
         };
 
         let session = device

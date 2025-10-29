@@ -1,7 +1,7 @@
 #[cfg(feature = "frida")]
 use std::fs::{self, File};
 #[cfg(feature = "frida")]
-use std::io::{Read, Write};
+use std::io::Write;
 #[cfg(feature = "frida")]
 use std::net::{IpAddr, Ipv4Addr, TcpStream};
 #[cfg(feature = "frida")]

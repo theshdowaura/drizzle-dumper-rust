@@ -7,7 +7,7 @@ mod imp {
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
 
-    use goblin::elf::Elf;
+    use goblin::elf::{note::NT_PRSTATUS, Elf};
     use nix::libc;
     use nix::sys::ptrace;
     use nix::sys::wait::{waitpid, WaitStatus};
@@ -23,16 +23,14 @@ mod imp {
             .context("resolve remote dlopen")?;
 
         let flags = libc::RTLD_NOW | libc::RTLD_GLOBAL;
-        proc.call_function(
-            dlopen_addr,
-            &[proc.write_cstring(library)?, flags as u64, 0, 0, 0, 0],
-        )?;
+        let cstr_addr = proc.write_cstring(library)?;
+        proc.call_function(dlopen_addr, &[cstr_addr, flags as u64, 0, 0, 0, 0])?;
         Ok(())
     }
 
     struct RemoteProcess {
         pid: Pid,
-        regs_backup: user_regs,
+        regs_backup: UserPtRegs,
         mem: File,
     }
 
@@ -67,19 +65,11 @@ mod imp {
             self.write_bytes(trampoline, &TRAP_INSTRUCTION)?;
 
             regs.sp = stack;
-            regs.lr = trampoline;
+            regs.set_lr(trampoline);
             regs.pc = func;
 
             for (idx, value) in args.iter().enumerate() {
-                match idx {
-                    0 => regs.x0 = *value,
-                    1 => regs.x1 = *value,
-                    2 => regs.x2 = *value,
-                    3 => regs.x3 = *value,
-                    4 => regs.x4 = *value,
-                    5 => regs.x5 = *value,
-                    _ => {}
-                }
+                regs.set_x(idx, *value);
             }
 
             setregs(self.pid, &regs)?;
@@ -97,7 +87,7 @@ mod imp {
             setregs(self.pid, &backup)?;
             self.write_bytes(trampoline, &orig)?;
 
-            Ok(result_regs.x0)
+            Ok(result_regs.x(0))
         }
 
         fn write_cstring(&mut self, path: &Path) -> Result<u64> {
@@ -174,21 +164,44 @@ mod imp {
         Err(anyhow::anyhow!("symbol {symbol} not found in {hint}"))
     }
 
-    type user_regs = libc::user_pt_regs;
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct UserPtRegs {
+        regs: [u64; 31],
+        sp: u64,
+        pc: u64,
+        pstate: u64,
+    }
 
-    fn getregs(pid: Pid) -> Result<user_regs> {
+    impl UserPtRegs {
+        fn set_x(&mut self, idx: usize, value: u64) {
+            if idx < self.regs.len() {
+                self.regs[idx] = value;
+            }
+        }
+
+        fn x(&self, idx: usize) -> u64 {
+            self.regs.get(idx).copied().unwrap_or(0)
+        }
+
+        fn set_lr(&mut self, value: u64) {
+            self.set_x(30, value);
+        }
+    }
+
+    fn getregs(pid: Pid) -> Result<UserPtRegs> {
         unsafe {
             let mut iov = libc::iovec {
                 iov_base: std::ptr::null_mut(),
-                iov_len: std::mem::size_of::<user_regs>(),
+                iov_len: std::mem::size_of::<UserPtRegs>(),
             };
-            let mut regs = std::mem::MaybeUninit::<user_regs>::uninit();
+            let mut regs = std::mem::MaybeUninit::<UserPtRegs>::uninit();
             iov.iov_base = regs.as_mut_ptr() as *mut _;
-            iov.iov_len = std::mem::size_of::<user_regs>();
+            iov.iov_len = std::mem::size_of::<UserPtRegs>();
             let ret = libc::ptrace(
                 libc::PTRACE_GETREGSET,
                 pid.as_raw(),
-                libc::NT_PRSTATUS as *mut libc::c_void,
+                NT_PRSTATUS as *mut libc::c_void,
                 &mut iov as *mut _ as *mut libc::c_void,
             );
             if ret != 0 {
@@ -198,16 +211,16 @@ mod imp {
         }
     }
 
-    fn setregs(pid: Pid, regs: &user_regs) -> Result<()> {
+    fn setregs(pid: Pid, regs: &UserPtRegs) -> Result<()> {
         unsafe {
             let mut iov = libc::iovec {
                 iov_base: regs as *const _ as *mut _,
-                iov_len: std::mem::size_of::<user_regs>(),
+                iov_len: std::mem::size_of::<UserPtRegs>(),
             };
             let ret = libc::ptrace(
                 libc::PTRACE_SETREGSET,
                 pid.as_raw(),
-                libc::NT_PRSTATUS as *mut libc::c_void,
+                NT_PRSTATUS as *mut libc::c_void,
                 &mut iov as *mut _ as *mut libc::c_void,
             );
             if ret != 0 {
