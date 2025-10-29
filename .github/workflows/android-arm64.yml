@@ -74,13 +74,22 @@ jobs:
           fi
 
       - name: Build (aarch64-linux-android)
-        run: cargo build --release --target aarch64-linux-android --features frida
+        run: cargo build --release --target aarch64-linux-android --features frida,frida-gadget-bundle
+
+      - name: Assemble artifact bundle
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/aarch64-linux-android/release/drizzle_dumper dist/
+          if [ -f assets/frida/arm64/libfrida-gadget.so ]; then
+            cp assets/frida/arm64/libfrida-gadget.so dist/
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: drizzle-dumper-android-arm64
-          path: target/aarch64-linux-android/release/drizzle_dumper
+          path: dist/
 
   prepare-gadget:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.gadget_version != ''
@@ -102,7 +111,7 @@ jobs:
           echo "Fetching $url"
           curl -L "$url" -o "frida-gadget-${VERSION}-android-arm64.so.xz"
           unxz -f "frida-gadget-${VERSION}-android-arm64.so.xz"
-          mv frida-gadget-${VERSION}-android-arm64.so assets/frida/arm64/frida-gadget.so
+          mv frida-gadget-${VERSION}-android-arm64.so assets/frida/arm64/libfrida-gadget.so
 
       - name: Commit updated gadget
         env:

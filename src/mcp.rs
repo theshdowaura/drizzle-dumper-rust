@@ -690,22 +690,55 @@ impl ToolHandler for DumpTool {
             .await
             .map_err(|err| McpError::internal(format!("dump task join error: {err}")))?;
 
+        let dump_mode_label = match cfg.dump_mode {
+            DumpMode::Ptrace => "ptrace",
+            DumpMode::Frida => "frida",
+        };
+        #[cfg(feature = "frida")]
+        let frida_snapshot = if cfg.dump_mode == DumpMode::Frida {
+            Some(json!({
+                "remote": cfg.frida.remote,
+                "usb": cfg.frida.use_usb,
+                "spawn": cfg.frida.spawn,
+                "script_path": cfg.frida.script_path.as_ref().map(|p| p.display().to_string()),
+                "chunk_size": cfg.frida.chunk_size,
+                "gadget": {
+                    "enabled": cfg.frida.gadget_enabled,
+                    "port": cfg.frida.gadget_port,
+                    "keep_files": cfg.frida.gadget_keep_files,
+                    "library_path": cfg.frida.gadget_library_path.as_ref().map(|p| p.display().to_string()),
+                    "config_path": cfg.frida.gadget_config_path.as_ref().map(|p| p.display().to_string()),
+                    "deployment_id": cfg.frida.gadget_id.clone()
+                }
+            }))
+        } else {
+            None
+        };
+
         let dumps = result.map_err(|err| McpError::internal(err.to_string()))?;
-        let message = if dumps.is_empty() {
+        let files: Vec<String> = dumps.iter().map(|p| p.display().to_string()).collect();
+        let count = files.len();
+        let message = if files.is_empty() {
             "No dex/cdex regions dumped. Check server logs for details.".to_string()
         } else {
-            let list = dumps
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join("\n- ");
-            format!("Dumped {} file(s):\n- {}", dumps.len(), list)
+            let list = files.join("\n- ");
+            format!("Dumped {count} file(s):\n- {list}")
         };
+
+        let mut structured = json!({
+            "files": files,
+            "count": count,
+            "mode": dump_mode_label,
+        });
+        #[cfg(feature = "frida")]
+        {
+            structured["frida"] = frida_snapshot.unwrap_or(Value::Null);
+        }
 
         Ok(ToolResult {
             content: vec![Content::text(message)],
             is_error: None,
-            structured_content: None,
+            structured_content: Some(structured),
             meta: None,
         })
     }
@@ -946,7 +979,10 @@ impl ToolHandler for CleanupGadgetTool {
                 Ok(ToolResult {
                     content: vec![Content::text(format!("Cleaned up FRIDA gadget `{}`", id))],
                     is_error: None,
-                    structured_content: None,
+                    structured_content: Some(json!({
+                        "deployment_id": id,
+                        "removed": true
+                    })),
                     meta: None,
                 })
             }
@@ -1152,26 +1188,62 @@ fn dump_tool_schema(include_frida: bool) -> Value {
             "mode".into(),
             json!({"type": "string", "enum": ["ptrace", "frida"]}),
         );
-        properties.insert("frida".into(), json!({"type": "boolean"}));
-        properties.insert("frida_remote".into(), json!({"type": "string"}));
-        properties.insert("frida_usb".into(), json!({"type": "boolean"}));
-        properties.insert("frida_spawn".into(), json!({"type": "boolean"}));
-        properties.insert("frida_attach".into(), json!({"type": "boolean"}));
-        properties.insert("frida_no_resume".into(), json!({"type": "boolean"}));
-        properties.insert("frida_script".into(), json!({"type": "string"}));
+        properties.insert(
+            "frida".into(),
+            json!({"type": "boolean", "description": "Shorthand to force FRIDA mode without specifying \"mode\": \"frida\"."}),
+        );
+        properties.insert(
+            "frida_remote".into(),
+            json!({"type": "string", "description": "Connect to an existing frida-server at <host:port> instead of spawning/gadget injection."}),
+        );
+        properties.insert(
+            "frida_usb".into(),
+            json!({"type": "boolean", "description": "Prefer the first USB device reported by Frida when selecting the target device."}),
+        );
+        properties.insert(
+            "frida_spawn".into(),
+            json!({"type": "boolean", "description": "Request cold start (spawn) of the package. Gadget 模式会自动忽略该选项。"}),
+        );
+        properties.insert(
+            "frida_attach".into(),
+            json!({"type": "boolean", "description": "Force attach to an already running process (equivalent to CLI --frida-attach)."}),
+        );
+        properties.insert(
+            "frida_no_resume".into(),
+            json!({"type": "boolean", "description": "当 spawn 模式下保持进程暂停，直到脚本加载完毕。"}),
+        );
+        properties.insert(
+            "frida_script".into(),
+            json!({"type": "string", "description": "自定义 agent 脚本的绝对路径；缺省时使用内置 Dex Hook 脚本。"}),
+        );
         properties.insert(
             "frida_chunk".into(),
-            json!({"type": "integer", "minimum": 4096}),
+            json!({"type": "integer", "minimum": 4096, "description": "Dex 分块传输大小（字节），默认 16 MiB。"}),
         );
-        properties.insert("frida_gadget".into(), json!({"type": "boolean"}));
+        properties.insert(
+            "frida_gadget".into(),
+            json!({"type": "boolean", "description": "启用自动部署 FRIDA Gadget；为 true 时会忽略 spawn 并自动使用 attach 模式。"}),
+        );
         properties.insert(
             "frida_gadget_port".into(),
-            json!({"type": "integer", "minimum": 1, "maximum": 65535}),
+            json!({"type": "integer", "minimum": 1, "maximum": 65535, "description": "监听端口；不指定时随机选择 28000-40000 区间。"}),
         );
-        properties.insert("frida_gadget_keep".into(), json!({"type": "boolean"}));
-        properties.insert("frida_gadget_path".into(), json!({"type": "string"}));
-        properties.insert("frida_gadget_config".into(), json!({"type": "string"}));
-        properties.insert("frida_gadget_id".into(), json!({"type": "string"}));
+        properties.insert(
+            "frida_gadget_keep".into(),
+            json!({"type": "boolean", "description": "任务结束后是否保留生成的 Gadget 目录/文件。"}),
+        );
+        properties.insert(
+            "frida_gadget_path".into(),
+            json!({"type": "string", "description": "自带的 frida-gadget.so 文件路径；若未提供则使用内置 bundle（需启用 frida-gadget-bundle）。"}),
+        );
+        properties.insert(
+            "frida_gadget_config".into(),
+            json!({"type": "string", "description": "自定义 gadget 配置文件路径；不提供时会自动生成仅监听 127.0.0.1:<port> 的模板。"}),
+        );
+        properties.insert(
+            "frida_gadget_id".into(),
+            json!({"type": "string", "description": "复用 `prepare_frida_gadget` 产生的 deployment_id，跳过文件重新生成。"}),
+        );
     }
 
     let mut schema = Map::new();
@@ -1187,11 +1259,28 @@ fn gadget_prepare_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "out_dir": {"type": "string"},
-            "frida_gadget_port": {"type": "integer", "minimum": 1, "maximum": 65535},
-            "frida_gadget_keep": {"type": "boolean"},
-            "frida_gadget_path": {"type": "string"},
-            "frida_gadget_config": {"type": "string"}
+            "out_dir": {
+                "type": "string",
+                "description": "设备上用于存放 Gadget 运行目录的根路径，默认 /data/local/tmp/drizzle_gadget。"
+            },
+            "frida_gadget_port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535,
+                "description": "监听端口；若为空则自动随机。"
+            },
+            "frida_gadget_keep": {
+                "type": "boolean",
+                "description": "保留生成的临时目录，便于后续手动注入或排查。"
+            },
+            "frida_gadget_path": {
+                "type": "string",
+                "description": "已有的 frida-gadget.so 路径；为空时写入内置镜像。"
+            },
+            "frida_gadget_config": {
+                "type": "string",
+                "description": "外部配置 JSON；未提供时会生成默认的 script 监听配置。"
+            }
         }
     })
 }
@@ -1201,10 +1290,24 @@ fn gadget_inject_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "deployment_id": {"type": "string"},
-            "package": {"type": "string"},
-            "pid": {"type": "integer", "minimum": 1},
-            "timeout": {"type": "integer", "minimum": 1}
+            "deployment_id": {
+                "type": "string",
+                "description": "`prepare_frida_gadget` 返回的 ID，用于复用已生成的 Gadget。"
+            },
+            "package": {
+                "type": "string",
+                "description": "目标进程包名；pid 与 package 至少提供其一。"
+            },
+            "pid": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "目标进程 PID。"
+            },
+            "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "等待 Gadget 监听端口就绪的秒数，默认 10。"
+            }
         },
         "required": ["deployment_id"]
     })
@@ -1215,7 +1318,10 @@ fn gadget_cleanup_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "deployment_id": {"type": "string"}
+            "deployment_id": {
+                "type": "string",
+                "description": "要清理的 Gadget 部署 ID（与 prepare/inject 共用）。"
+            }
         },
         "required": ["deployment_id"]
     })
