@@ -54,10 +54,9 @@ jobs:
           echo "CC_aarch64_linux_android=${toolchain_bin}/aarch64-linux-android${target_api}-clang" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${toolchain_bin}/aarch64-linux-android${target_api}-clang" >> "$GITHUB_ENV"
 
-          cat <<EOF >> "$GITHUB_ENV"
-BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=--target=aarch64-linux-android${target_api} --sysroot=$sysroot -I$sysroot/usr/include -I$sysroot/usr/include/aarch64-linux-android -D__ANDROID_API__=${target_api}
-BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android=--target=aarch64-linux-android${target_api} --sysroot=$sysroot -I$sysroot/usr/include -I$sysroot/usr/include/aarch64-linux-android -D__ANDROID_API__=${target_api}
-EOF
+          BCA_ARGS="--target=aarch64-linux-android${target_api} --sysroot=$sysroot -I$sysroot/usr/include -I$sysroot/usr/include/aarch64-linux-android -D__ANDROID_API__=${target_api}"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=$BCA_ARGS" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android=$BCA_ARGS" >> "$GITHUB_ENV"
 
       - name: Download FRIDA core devkit
         run: |
