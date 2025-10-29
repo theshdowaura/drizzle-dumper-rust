@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     net::SocketAddr,
+    panic::{catch_unwind, AssertUnwindSafe},
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -712,11 +713,24 @@ impl ToolHandler for DumpTool {
         };
 
         let cfg_for_run = cfg.clone();
-        let result = task::spawn_blocking(move || run_dump_workflow(&package, &cfg_for_run))
-            .await
-            .map_err(|err| McpError::internal(format!("dump task join error: {err}")))?;
+        let package_for_run = package.clone();
+        let join_result = task::spawn_blocking(move || {
+            catch_unwind(AssertUnwindSafe(|| {
+                run_dump_workflow(&package_for_run, &cfg_for_run)
+            }))
+        })
+        .await
+        .map_err(|err| McpError::internal(format!("dump task join error: {err}")))?;
 
-        let dumps = result.map_err(|err| McpError::internal(err.to_string()))?;
+        let result = match join_result {
+            Ok(res) => res.map_err(|err| McpError::internal(err.to_string()))?,
+            Err(_) => {
+                return Err(McpError::internal(
+                    "dump workflow panicked; server recovered".to_string(),
+                ))
+            }
+        };
+        let dumps = result;
         let files: Vec<String> = dumps.iter().map(|p| p.display().to_string()).collect();
         let count = files.len();
         let message = if files.is_empty() {
@@ -810,10 +824,22 @@ impl PrepareGadgetTool {
 impl ToolHandler for PrepareGadgetTool {
     async fn call(&self, arguments: HashMap<String, Value>) -> Result<ToolResult, McpError> {
         let cfg = gadget_config_from_args(&arguments)?;
-        let deployment = task::spawn_blocking(move || prepare_gadget(&cfg))
-            .await
-            .map_err(|err| McpError::internal(format!("prepare gadget task failed: {err}")))?
-            .map_err(|err| McpError::internal(err.to_string()))?;
+        let cfg_for_run = cfg.clone();
+        let join_result = task::spawn_blocking(move || {
+            catch_unwind(AssertUnwindSafe(|| prepare_gadget(&cfg_for_run)))
+        })
+        .await
+        .map_err(|err| McpError::internal(format!("prepare gadget task failed: {err}")))?;
+
+        let deployment = match join_result {
+            Ok(Ok(dep)) => dep,
+            Ok(Err(err)) => return Err(McpError::internal(err.to_string())),
+            Err(_) => {
+                return Err(McpError::internal(
+                    "prepare gadget panicked; server recovered".to_string(),
+                ))
+            }
+        };
 
         let info = GadgetInfo::from_deployment(&deployment);
         let id = generate_random_id();
@@ -896,39 +922,53 @@ impl ToolHandler for InjectGadgetTool {
         let config_path = info.config_path.clone();
         let port = info.port;
         let package_for_lookup = package_arg.clone();
-        let join_result = task::spawn_blocking(move || -> Result<i32> {
-            let pid = if let Some(pid) = pid_arg {
-                pid as i32
-            } else {
-                let package = package_for_lookup
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("`package` or `pid` required"))?;
-                find_process_pid(package)?.ok_or_else(|| anyhow!("process {package} not found"))?
-            };
-            let tid =
-                find_clone_thread(pid)?.ok_or_else(|| anyhow!("no thread found for pid {pid}"))?;
+        let join_result = task::spawn_blocking(move || {
+            catch_unwind(AssertUnwindSafe(|| -> Result<i32> {
+                let pid = if let Some(pid) = pid_arg {
+                    pid as i32
+                } else {
+                    let package = package_for_lookup
+                        .as_deref()
+                        .ok_or_else(|| anyhow!("`package` or `pid` required"))?;
+                    find_process_pid(package)?
+                        .ok_or_else(|| anyhow!("process {package} not found"))?
+                };
+                let tid = find_clone_thread(pid)?
+                    .ok_or_else(|| anyhow!("no thread found for pid {pid}"))?;
 
-            let prev_env = std::env::var_os("FRIDA_GADGET_CONFIG");
-            if let Some(config_path) = config_path.as_deref() {
-                std::env::set_var("FRIDA_GADGET_CONFIG", config_path);
-            }
+                let prev_env = std::env::var_os("FRIDA_GADGET_CONFIG");
+                if let Some(config_path) = config_path.as_deref() {
+                    std::env::set_var("FRIDA_GADGET_CONFIG", config_path);
+                }
 
-            inject_library(tid, library_path.as_path())?;
-            wait_for_gadget(port, Duration::from_secs(timeout_secs))?;
+                inject_library(tid, library_path.as_path())?;
+                wait_for_gadget(port, Duration::from_secs(timeout_secs))?;
 
-            match (config_path.as_deref(), prev_env) {
-                (_, Some(prev)) => std::env::set_var("FRIDA_GADGET_CONFIG", prev),
-                (Some(_), None) => std::env::remove_var("FRIDA_GADGET_CONFIG"),
-                _ => {}
-            }
+                match (config_path.as_deref(), prev_env) {
+                    (_, Some(prev)) => std::env::set_var("FRIDA_GADGET_CONFIG", prev),
+                    (Some(_), None) => std::env::remove_var("FRIDA_GADGET_CONFIG"),
+                    _ => {}
+                }
 
-            Ok(pid)
+                Ok(pid)
+            }))
         })
         .await
         .map_err(|err| McpError::internal(format!("inject gadget task failed: {err}")))?;
 
-        let target_pid = join_result
-            .map_err(|err| McpError::internal(format!("inject gadget task failed: {err}")))?;
+        let target_pid = match join_result {
+            Ok(Ok(pid)) => pid,
+            Ok(Err(err)) => {
+                return Err(McpError::internal(format!(
+                    "inject gadget task failed: {err}"
+                )))
+            }
+            Err(_) => {
+                return Err(McpError::internal(
+                    "inject gadget panicked; server recovered".to_string(),
+                ))
+            }
+        };
 
         let target_desc = package_arg
             .as_deref()
