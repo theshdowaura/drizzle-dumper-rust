@@ -1,0 +1,10 @@
+{
+  "gadget_path": "/data/adb/modules/drizzle-zygisk/frida/frida-gadget.so",
+  "config_path": "/data/adb/modules/drizzle-zygisk/frida/frida-gadget.config",
+  "packages": [
+    "com.example.app"
+  ],
+  "denylist": [
+    "com.android.systemui"
+  ]
+}

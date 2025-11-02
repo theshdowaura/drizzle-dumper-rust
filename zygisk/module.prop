@@ -1,0 +1,6 @@
+id=drizzle-zygisk
+name=DrizzleDumper Zygisk Loader
+version=0.1.0
+versionCode=1
+author=drizzleDumper
+description=System-level Frida Gadget loader for drizzle-dumper, injecting target apps from zygote via Zygisk.

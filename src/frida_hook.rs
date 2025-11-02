@@ -59,13 +59,17 @@ mod inner {
             config_path: Option<PathBuf>,
             port: u16,
         },
+        Zygisk {
+            port: u16,
+        },
     }
 
     impl GadgetContext {
-        fn library_path(&self) -> &Path {
+        fn library_path(&self) -> Option<&Path> {
             match self {
-                GadgetContext::Managed(dep) => dep.library_path.as_path(),
-                GadgetContext::External { library_path, .. } => library_path.as_path(),
+                GadgetContext::Managed(dep) => Some(dep.library_path.as_path()),
+                GadgetContext::External { library_path, .. } => Some(library_path.as_path()),
+                GadgetContext::Zygisk { .. } => None,
             }
         }
 
@@ -73,6 +77,7 @@ mod inner {
             match self {
                 GadgetContext::Managed(dep) => Some(dep.config_path.as_path()),
                 GadgetContext::External { config_path, .. } => config_path.as_deref(),
+                GadgetContext::Zygisk { .. } => None,
             }
         }
 
@@ -80,7 +85,12 @@ mod inner {
             match self {
                 GadgetContext::Managed(dep) => dep.port,
                 GadgetContext::External { port, .. } => *port,
+                GadgetContext::Zygisk { port } => *port,
             }
+        }
+
+        fn needs_injection(&self) -> bool {
+            !matches!(self, GadgetContext::Zygisk { .. })
         }
     }
 
@@ -88,7 +98,10 @@ mod inner {
         let frida_ctx = unsafe { Frida::obtain() };
         let manager = DeviceManager::obtain(&frida_ctx);
 
-        let gadget = if let Some(path) = cfg.frida.gadget_library_path.as_ref() {
+        let gadget = if cfg.zygisk_enabled {
+            let port = cfg.frida.gadget_port.unwrap_or(27_042);
+            Some(GadgetContext::Zygisk { port })
+        } else if let Some(path) = cfg.frida.gadget_library_path.as_ref() {
             let port = cfg
                 .frida
                 .gadget_port
@@ -130,19 +143,32 @@ mod inner {
         let pid_i32 = i32::try_from(target_pid).unwrap_or(i32::MAX);
 
         if let Some(ctx) = gadget.as_ref() {
-            let tid = wait_for_injectable_thread(pid_i32)
-                .with_context(|| format!("locate thread for pid {pid_i32}"))?;
-            let prev_env = std::env::var_os("FRIDA_GADGET_CONFIG");
-            if let Some(config) = ctx.config_path() {
-                std::env::set_var("FRIDA_GADGET_CONFIG", config);
-            }
-            inject_library(tid, ctx.library_path()).context("inject gadget library")?;
             let gadget_wait = Duration::from_secs(cfg.frida.gadget_ready_timeout);
-            wait_for_gadget(ctx.port(), gadget_wait).context("wait gadget listener")?;
-            match (ctx.config_path(), prev_env) {
-                (_, Some(prev)) => std::env::set_var("FRIDA_GADGET_CONFIG", prev),
-                (Some(_), None) => std::env::remove_var("FRIDA_GADGET_CONFIG"),
-                _ => {}
+            if ctx.needs_injection() {
+                let tid = wait_for_injectable_thread(pid_i32)
+                    .with_context(|| format!("locate thread for pid {pid_i32}"))?;
+                let prev_env = std::env::var_os("FRIDA_GADGET_CONFIG");
+                if let Some(config) = ctx.config_path() {
+                    std::env::set_var("FRIDA_GADGET_CONFIG", config);
+                }
+                if let Some(path) = ctx.library_path() {
+                    inject_library(tid, path).context("inject gadget library")?;
+                } else {
+                    bail!("gadget context missing library path");
+                }
+                wait_for_gadget(ctx.port(), gadget_wait).context("wait gadget listener")?;
+                match (ctx.config_path(), prev_env) {
+                    (_, Some(prev)) => std::env::set_var("FRIDA_GADGET_CONFIG", prev),
+                    (Some(_), None) => std::env::remove_var("FRIDA_GADGET_CONFIG"),
+                    _ => {}
+                }
+            } else {
+                println!(
+                    "[*]  Waiting for Zygisk gadget on port {} (timeout {}s)…",
+                    ctx.port(),
+                    cfg.frida.gadget_ready_timeout
+                );
+                wait_for_gadget(ctx.port(), gadget_wait).context("wait gadget listener")?;
             }
         }
 

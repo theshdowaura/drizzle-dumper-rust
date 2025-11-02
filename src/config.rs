@@ -81,6 +81,7 @@ pub struct Config {
     pub map_patterns: Vec<String>,
     pub dump_mode: DumpMode,
     pub frida: FridaConfig,
+    pub zygisk_enabled: bool,
 }
 
 impl Default for Config {
@@ -100,6 +101,7 @@ impl Default for Config {
             map_patterns: Vec::new(),
             dump_mode: DumpMode::Ptrace,
             frida: FridaConfig::default(),
+            zygisk_enabled: false,
         }
     }
 }
