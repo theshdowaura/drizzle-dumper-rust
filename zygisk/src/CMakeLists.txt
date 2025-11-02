@@ -13,6 +13,7 @@ add_library(drizzlezygisk SHARED module.cpp)
 target_include_directories(drizzlezygisk
   PRIVATE
     ${ANDROID_NDK}/sources/cxx-stl/llvm-libc++/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
 )
 
 if (nlohmann_json_FOUND)
