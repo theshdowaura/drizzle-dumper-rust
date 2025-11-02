@@ -146,8 +146,12 @@ class DrizzleModule : public zygisk::ModuleBase {
 
   void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
     current_nice_name_.clear();
-    if (args->nice_name) {
-      current_nice_name_ = args->nice_name->c_str();
+    if (args->nice_name && *args->nice_name) {
+      const char* name = env_->GetStringUTFChars(*args->nice_name, nullptr);
+      if (name) {
+        current_nice_name_ = name;
+        env_->ReleaseStringUTFChars(*args->nice_name, name);
+      }
     }
     should_inject_ = ShouldInject(current_nice_name_);
     if (should_inject_) {
