@@ -1,6 +1,7 @@
 use anyhow::Result;
-use drizzle_dumper::config::print_usage;
-use drizzle_dumper::{parse_config, run_dump_workflow, run_mcp_server};
+use clap::Parser;
+use drizzle_dumper::cli::{Cli, Commands};
+use drizzle_dumper::{run_dump_workflow, run_mcp_server};
 use nix::unistd::getuid;
 
 fn main() -> Result<()> {
@@ -8,24 +9,19 @@ fn main() -> Result<()> {
     println!("[>>>]    rewritten by Codex       [<<<]");
     println!("[>>>]        2025.10              [<<<]");
 
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() <= 1 {
-        print_usage();
-        return Ok(());
-    }
+    let cli = Cli::parse();
 
-    if args[1] == "--mcp-server" {
-        let bind = args.get(2).map(|s| s.as_str()).unwrap_or("0.0.0.0:45831");
-        return run_mcp_server(bind);
-    }
+    match cli.command {
+        Commands::McpServer(opts) => run_mcp_server(&opts.bind),
+        Commands::Dump(opts) => {
+            if !getuid().is_root() {
+                println!("[*]  Device Not root!");
+                return Ok(());
+            }
 
-    if !getuid().is_root() {
-        println!("[*]  Device Not root!");
-        return Ok(());
+            let cfg = opts.to_config();
+            run_dump_workflow(&opts.package, &cfg)?;
+            Ok(())
+        }
     }
-
-    let package_name = &args[1];
-    let cfg = parse_config(&args)?;
-    let _ = run_dump_workflow(package_name, &cfg)?;
-    Ok(())
 }

@@ -191,7 +191,7 @@ impl MapWatcher {
     }
 }
 
-fn find_process_pid(package_name: &str) -> Result<Option<i32>> {
+pub(crate) fn find_process_pid(package_name: &str) -> Result<Option<i32>> {
     for entry in all_processes().context("iterate /proc")? {
         let process = match entry {
             Ok(p) => p,

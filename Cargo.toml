@@ -19,7 +19,8 @@ tokio-stream = "0.1"
 futures-util = "0.3"
 tracing = "0.1"
 rand = "0.8"
-frida = { version = "0.17", optional = true }
+clap = { version = "4.5", features = ["derive"] }
+frida = { version = "0.17", optional = true, features = ["auto-download"] }
 goblin = { version = "0.9", optional = true }
 
 [dev-dependencies]
@@ -29,6 +30,7 @@ tower = "0.5"
 default = []
 frida = ["dep:frida", "dep:goblin"]
 frida-gadget-bundle = ["frida"]
+
 
 [profile.release]
 opt-level = "z"

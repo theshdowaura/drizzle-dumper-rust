@@ -86,7 +86,7 @@ mod inner {
         let frida_ctx = unsafe { Frida::obtain() };
         let manager = DeviceManager::obtain(&frida_ctx);
 
-        let mut gadget = if let Some(path) = cfg.frida.gadget_library_path.as_ref() {
+        let gadget = if let Some(path) = cfg.frida.gadget_library_path.as_ref() {
             let port = cfg
                 .frida
                 .gadget_port
@@ -107,7 +107,7 @@ mod inner {
         }
 
         let spawn_mode = cfg.frida.spawn && gadget.is_none();
-        let device = if spawn_mode {
+        let mut device_opt = if gadget.is_none() {
             Some(select_device(&manager, cfg).context("select FRIDA device")?)
         } else {
             None
@@ -115,7 +115,9 @@ mod inner {
         let mut spawn_pid: Option<u32> = None;
         let target_pid = if spawn_mode {
             let options = SpawnOptions::default();
-            let dev = device.as_ref().expect("device for spawn");
+            let dev = device_opt
+                .as_mut()
+                .expect("device selection must succeed for spawn mode");
             let pid = dev
                 .spawn(package_name, &options)
                 .with_context(|| format!("spawn {package_name} via FRIDA"))?;
@@ -144,12 +146,14 @@ mod inner {
             }
         }
 
-        let device = match (device, gadget.as_ref()) {
+        let device = match (device_opt, gadget.as_ref()) {
             (Some(existing), _) => existing,
             (None, Some(ctx)) => manager
-                .add_remote_device(&format!("127.0.0.1:{}", ctx.port()))
+                .get_remote_device(&format!("127.0.0.1:{}", ctx.port()))
                 .context("connect gadget device")?,
-            _ => unreachable!(),
+            (None, None) => {
+                select_device(&manager, cfg).context("select FRIDA device for attach")?
+            }
         };
 
         let session = device
@@ -246,7 +250,7 @@ mod inner {
                 .with_context(|| format!("connect remote device {remote}"));
         }
         if cfg.frida.use_usb {
-            if let Ok(device) = manager.get_device_by_type(DeviceType::Usb) {
+            if let Ok(device) = manager.get_device_by_type(DeviceType::USB) {
                 return Ok(device);
             }
         }
@@ -265,13 +269,15 @@ mod inner {
                 Message::Send(payload) => self.handle_send(payload, data),
                 Message::Log(log) => {
                     let level = format!("{:?}", log.level);
-                    let msg = log.payload.clone().unwrap_or_default();
+                    let msg = log.payload.clone();
                     self.sender.send(AgentEvent::Log {
                         level,
                         message: msg,
                     })
                 }
-                Message::Error(err) => self.sender.send(AgentEvent::AgentError(err.text.clone())),
+                Message::Error(err) => self
+                    .sender
+                    .send(AgentEvent::AgentError(err.description.clone())),
                 Message::Other(value) => self.sender.send(AgentEvent::AgentError(format!(
                     "unexpected message: {value}"
                 ))),
@@ -285,7 +291,7 @@ mod inner {
             payload: &MessageSend,
             data: Option<Vec<u8>>,
         ) -> Result<(), mpsc::SendError<AgentEvent>> {
-            let json = payload.returns.clone();
+            let json = payload.payload.returns.clone();
             match serde_json::from_value::<AgentPayload>(json) {
                 Ok(agent_payload) => self.route_agent_payload(agent_payload, data),
                 Err(err) => self.sender.send(AgentEvent::AgentError(format!(
@@ -324,6 +330,7 @@ mod inner {
                     symbol: payload.symbol,
                     location: payload.location,
                     magic: payload.magic,
+                    reported: payload.reported,
                 })),
                 "hook-error" => self
                     .sender
@@ -378,6 +385,7 @@ mod inner {
         symbol: Option<String>,
         location: Option<String>,
         magic: Option<String>,
+        reported: Option<u64>,
     }
 
     struct DexAssembly {
@@ -431,12 +439,47 @@ mod inner {
             Ok(())
         }
 
+        fn merge_chunk_meta(&mut self, chunk: &DexChunk) {
+            if self.symbol.is_none() {
+                self.symbol = chunk.symbol.clone();
+            }
+            if self.location.is_none() {
+                self.location = chunk.location.clone();
+            }
+            if self.magic.is_none() {
+                self.magic = chunk.magic.clone();
+            }
+            if self.reported.is_none() && chunk.size > 0 {
+                self.reported = Some(chunk.size);
+            }
+        }
+
+        fn merge_complete_meta(&mut self, complete: &DexComplete) {
+            if self.symbol.is_none() {
+                self.symbol = complete.symbol.clone();
+            }
+            if self.location.is_none() {
+                self.location = complete.location.clone();
+            }
+            if self.magic.is_none() {
+                self.magic = complete.magic.clone();
+            }
+            if complete.size > 0 {
+                self.reported = Some(complete.size);
+            }
+            if let Some(reported) = complete.reported {
+                self.reported = Some(reported);
+            }
+        }
+
         fn complete(mut self, package: &str, cfg: &Config, pid: i32) -> Result<Option<PathBuf>> {
             if self.received == 0 {
                 return Ok(None);
             }
             self.buffer.truncate(self.received);
-            let kind = detect_dex_kind(&self.buffer).ok_or_else(|| anyhow!("unknown dex magic"))?;
+            let kind = detect_dex_kind(&self.buffer)
+                .or_else(|| self.magic.as_deref().and_then(DexKind::from_magic))
+                .ok_or_else(|| anyhow!("unknown dex magic"))?;
             if cfg.fix_header && matches!(kind, DexKind::Dex) && self.buffer.len() == self.expected
             {
                 fix_dex_header(&mut self.buffer);
@@ -467,6 +510,16 @@ mod inner {
         Cdex,
     }
 
+    impl DexKind {
+        fn from_magic(magic: &str) -> Option<Self> {
+            match magic {
+                "dex\n" => Some(DexKind::Dex),
+                "cdex" => Some(DexKind::Cdex),
+                _ => None,
+            }
+        }
+    }
+
     struct DexAggregator<'a> {
         package: &'a str,
         cfg: &'a Config,
@@ -489,7 +542,7 @@ mod inner {
         fn ingest_chunk(&mut self, chunk: DexChunk) -> Result<()> {
             let entry = self.assemblies.entry(chunk.key.clone());
             let assembly = match entry {
-                Entry::Occupied(mut occ) => occ.get_mut(),
+                Entry::Occupied(occ) => occ.into_mut(),
                 Entry::Vacant(vac) => {
                     let assembly = DexAssembly::new(
                         &chunk.key,
@@ -501,11 +554,13 @@ mod inner {
                     vac.insert(assembly)
                 }
             };
+            assembly.merge_chunk_meta(&chunk);
             assembly.ingest(chunk.offset, chunk.data)
         }
 
         fn complete(&mut self, complete: DexComplete) -> Result<Option<PathBuf>> {
-            if let Some(assembly) = self.assemblies.remove(&complete.key) {
+            if let Some(mut assembly) = self.assemblies.remove(&complete.key) {
+                assembly.merge_complete_meta(&complete);
                 if let Some(path) = assembly.complete(self.package, self.cfg, self.pid)? {
                     self.outputs.push(path.clone());
                     return Ok(Some(path));
