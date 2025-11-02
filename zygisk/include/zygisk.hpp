@@ -52,8 +52,8 @@ public:
 
 class Api {
 public:
-    void setOption(Option, bool);
-    void setProperty(Property, bool);
+    void setOption(Option, bool) {}
+    void setProperty(Property, bool) {}
 };
 
 class ModuleBase {
@@ -72,6 +72,13 @@ public:
 
 extern "C" void zygisk_module_load(zygisk::Api*, JNIEnv*);
 extern "C" void zygisk_module_unload();
+
+#define REGISTER_ZYGISK_MODULE(module)                                      \
+    extern "C" void zygisk_module_load(zygisk::Api* api, JNIEnv* env) {      \
+        static auto& _module = module;                                      \
+        _module.onLoad(api, env);                                           \
+    }                                                                       \
+    extern "C" void zygisk_module_unload() { module.onUnload(); }
 
 #define REGISTER_ZYGISK_MODULE(module)                                      \
     extern "C" void zygisk_module_load(zygisk::Api* api, JNIEnv* env) {      \
