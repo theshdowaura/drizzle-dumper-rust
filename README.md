@@ -39,12 +39,12 @@ FRIDA 模式通过 Hook `libart.so` 中的 `DexFile::OpenCommon` / `DexFile::Ope
 Zygisk Module
 -------------
 
-`zygisk/` 目录包含一个参考实现，可将 Frida Gadget 持久注入到目标应用的 zygote 分支中。使用步骤：
+`zygisk/` 目录包含一个参考实现，可将 Frida Gadget 持久注入到目标应用的 zygote 分支中。GitHub Actions（`.github/workflows/zygisk-module.yml`）会自动构建该模块并将 aarch64 版 `drizzle_dumper` 一并放入 `bin/` 目录，方便刷入后直接使用。手动构建时可按以下步骤操作：
 
 1. 按 `zygisk/README.md` 编译生成 `libdrizzlezygisk.so` 并打包为 Magisk 模块。
 2. 修改 `zygisk/config/targets.json` 定义需要注入的包名以及 Gadget/配置文件位置。
 3. 通过 Magisk 安装模块并重启，确保模块在 `logcat` 中记录 Gadget 加载信息。
-4. 运行 drizzle-dumper 时附加 `--zygisk`（或在 MCP 请求体增加 `"zygisk": true`），让工具仅连接 gadget 而不再 ptrace 注入。
+4. 运行 drizzle-dumper 时附加 `--zygisk`（或在 MCP 请求体增加 `"zygisk": true`），让工具仅连接 gadget 而不再 ptrace 注入。模块安装后，可直接使用 `/data/adb/modules/drizzle-zygisk/bin/drizzle_dumper`。
 
 该模块默认在 `service.sh` 中同步 drizzle-dumper 生成的 `frida-gadget.so` 和配置文件，便于脚本与 Zygisk 保持一致。
 

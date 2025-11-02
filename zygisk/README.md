@@ -15,6 +15,8 @@ zygisk/
 ├── service.sh           # Late_start service script used to copy/refresh assets
 ├── config/
 │   └── targets.json     # Package filter and gadget path configuration
+├── bin/
+│   └── drizzle_dumper   # Prebuilt CLI binary (aarch64) bundled for convenience
 ├── libs/
 │   └── arm64-v8a/
 │       └── libdrizzlezygisk.so  # Built shared object registered with Zygisk
@@ -25,8 +27,10 @@ zygisk/
 ```
 
 Only the `module.prop`, `config/targets.json`, and `libs/<abi>/libdrizzlezygisk.so`
-files are strictly required at runtime.  The `src/` tree provides build tooling
-for AOSP or standalone NDK environments.
+files are strictly required at runtime.  The `bin/` directory is optional but
+the published workflow bundles an aarch64 build of `drizzle_dumper` so the CLI
+is available on-device as soon as the module is flashed.  The `src/` tree
+provides build tooling for AOSP or standalone NDK environments.
 
 ## Build (standalone CMake)
 
@@ -48,7 +52,7 @@ Package the contents of this directory into a Magisk module archive:
 
 ```
 zip -r drizzle-zygisk.zip module.prop service.sh sepolicy.rule \
-    libs config
+    libs config bin
 ```
 
 Install the module with the Magisk app or using `adb shell magisk --install-module`.
@@ -60,6 +64,8 @@ After reboot, the module will:
 3. When a watched app forks from zygote, Zygisk calls `handle_app_specialize`.
    The module checks the package name and, if matched, `dlopen`s the gadget before
    the application `onCreate` executes.
+4. (Optional) Expose `/data/adb/modules/drizzle-zygisk/bin/drizzle_dumper` for manual
+   invocation or via automation scripts.
 
 The running drizzle-dumper instance can detect the presence of the module through
 the new CLI flag `--zygisk`, which toggles gadget management to “passive” mode
