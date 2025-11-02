@@ -14,7 +14,8 @@ zygisk/
 ├── sepolicy.rule        # Optional SELinux relaxations for gadget socket access
 ├── service.sh           # Late_start service script used to copy/refresh assets
 ├── config/
-│   └── targets.json     # Package filter and gadget path configuration
+│   ├── targets.json     # Package filter and gadget path configuration
+│   └── mcp_bind         # drizzle_dumper MCP server bind address
 ├── bin/
 │   └── drizzle_dumper   # Prebuilt CLI binary (aarch64) bundled for convenience
 ├── libs/
@@ -27,7 +28,8 @@ zygisk/
 ```
 
 Only the `module.prop`, `config/targets.json`, and `libs/<abi>/libdrizzlezygisk.so`
-files are strictly required at runtime.  The `bin/` directory is optional but
+files are strictly required at runtime.  `config/mcp_bind` controls the MCP server
+监听地址（默认 `0.0.0.0:45831`）。`bin/` 目录虽然可选，但发布包中已经附带
 the published workflow bundles an aarch64 build of `drizzle_dumper` so the CLI
 is available on-device as soon as the module is flashed.  The `src/` tree
 provides build tooling for AOSP or standalone NDK environments.
@@ -64,8 +66,9 @@ After reboot, the module will:
 3. When a watched app forks from zygote, Zygisk calls `handle_app_specialize`.
    The module checks the package name and, if matched, `dlopen`s the gadget before
    the application `onCreate` executes.
-4. (Optional) Expose `/data/adb/modules/drizzle-zygisk/bin/drizzle_dumper` for manual
-   invocation or via automation scripts.
+4. Service 脚本会在 late_start 阶段自动启动  
+   `/data/adb/modules/drizzle-zygisk/bin/drizzle_dumper mcp-server --bind <config/mcp_bind>`，
+   方便通过 MCP 工具触发 dump。需要手动交互时也可直接执行该二进制。
 
 The running drizzle-dumper instance can detect the presence of the module through
 the new CLI flag `--zygisk`, which toggles gadget management to “passive” mode

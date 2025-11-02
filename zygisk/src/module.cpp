@@ -4,8 +4,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,6 +29,8 @@ constexpr char kDefaultGadgetPath[] =
     "/data/adb/modules/drizzle-zygisk/frida/frida-gadget.so";
 constexpr char kDefaultConfigPath[] =
     "/data/adb/modules/drizzle-zygisk/frida/frida-gadget.config";
+constexpr char kCustomPackageList[] =
+    "/data/adb/modules/drizzle-zygisk/config/package_custom.list";
 
 struct Settings {
   std::string gadget_path = kDefaultGadgetPath;
@@ -40,6 +45,27 @@ std::string ReadFile(const char *path) {
     return {};
   }
   return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+std::vector<std::string> ParsePackageList(const std::string& data) {
+  std::vector<std::string> result;
+  std::istringstream stream(data);
+  std::string line;
+  while (std::getline(stream, line)) {
+    auto first = std::find_if_not(line.begin(), line.end(),
+                                  [](unsigned char ch) { return std::isspace(ch); });
+    auto last = std::find_if_not(line.rbegin(), line.rend(),
+                                 [](unsigned char ch) { return std::isspace(ch); })
+                    .base();
+    if (first >= last) {
+      continue;
+    }
+    std::string trimmed(first, last);
+    if (!trimmed.empty() && trimmed[0] != '#') {
+      result.push_back(trimmed);
+    }
+  }
+  return result;
 }
 
 Settings LoadSettings() {
@@ -111,6 +137,10 @@ Settings LoadSettings() {
                         "failed to parse %s: %s", kConfigPath, e.what());
   }
 #endif
+  auto custom = ParsePackageList(ReadFile(kCustomPackageList));
+  if (!custom.empty()) {
+    cfg.packages = std::move(custom);
+  }
   return cfg;
 }
 

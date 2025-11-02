@@ -46,7 +46,16 @@ Zygisk Module
 3. 通过 Magisk 安装模块并重启，确保模块在 `logcat` 中记录 Gadget 加载信息。
 4. 运行 drizzle-dumper 时附加 `--zygisk`（或在 MCP 请求体增加 `"zygisk": true`），让工具仅连接 gadget 而不再 ptrace 注入。模块安装后，可直接使用 `/data/adb/modules/drizzle-zygisk/bin/drizzle_dumper`。
 
-该模块默认在 `service.sh` 中同步 drizzle-dumper 生成的 `frida-gadget.so` 和配置文件，便于脚本与 Zygisk 保持一致。
+该模块默认在 `service.sh` 中同步 drizzle-dumper 生成的 `frida-gadget.so` 和配置文件，并自动启动 `drizzle_dumper mcp-server --bind <config/mcp_bind>`（默认 `0.0.0.0:45831`），便于通过 MCP 协议远程触发 dump。
+
+### WebUI 支持
+
+- 模块内置 `webroot/`，兼容 KernelSU/APatch 的 WebUI 规范。刷入后在模块详情页点击“打开页面”即可通过浏览器对以下内容进行管理：
+  - 列出 / 搜索所有第三方应用包名并批量勾选。
+  - 修改 MCP 监听地址、重启 drizzle-dumper MCP 服务。
+  - 后台触发一次 `drizzle_dumper dump <pkg> --zygisk`。
+- 生成的自定义名单保存在 `/data/adb/modules/drizzle-zygisk/config/package_custom.list`；MCP 监听配置存放在 `/data/adb/modules/drizzle-zygisk/config/mcp_bind`。
+- Magisk 用户需额外安装 [KSU WebUI](https://magiskmodule.gitlab.io/blog/how-to-use-webui-modules-on-magisk/) 或类似应用才能显示 WebUI 页面。
 
 Build
 -----
