@@ -1,0 +1,75 @@
+name: zygisk-module-build
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - "v*.*.*"
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  ANDROID_API_LEVEL: 29
+
+jobs:
+  build-zygisk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: false
+
+      - name: Configure CMake build
+        run: |
+          set -euo pipefail
+          ndk_root="${{ steps.setup-ndk.outputs.ndk-path }}"
+          abi="arm64-v8a"
+          platform="android-${ANDROID_API_LEVEL}"
+          cmake -S zygisk/src -B build/zygisk \
+            -DANDROID_NDK="$ndk_root" \
+            -DCMAKE_TOOLCHAIN_FILE="$ndk_root/build/cmake/android.toolchain.cmake" \
+            -DANDROID_PLATFORM="$platform" \
+            -DANDROID_ABI="$abi" \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build Zygisk shared object
+        run: |
+          set -euo pipefail
+          cmake --build build/zygisk --target drizzlezygisk --config Release
+
+      - name: Package Magisk module
+        run: |
+          set -euo pipefail
+          MODULE_ROOT=dist/zygisk-module
+          mkdir -p "$MODULE_ROOT/libs/arm64-v8a"
+          mkdir -p "$MODULE_ROOT/config"
+
+          cp zygisk/module.prop "$MODULE_ROOT/"
+          cp zygisk/service.sh "$MODULE_ROOT/"
+          cp zygisk/sepolicy.rule "$MODULE_ROOT/"
+          cp -r zygisk/config/targets.json "$MODULE_ROOT/config/"
+          cp build/zygisk/libdrizzlezygisk.so "$MODULE_ROOT/libs/arm64-v8a/"
+
+          (cd "$MODULE_ROOT" && zip -r ../drizzle-zygisk-module.zip .)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: drizzle-zygisk-module
+          path: dist/drizzle-zygisk-module.zip
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/drizzle-zygisk-module.zip
