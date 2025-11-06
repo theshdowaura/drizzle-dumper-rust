@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 async-trait = "0.1"
 anyhow = "1"
+thiserror = "1.0"
 nix = { version = "0.28", default-features = false, features = ["ptrace", "process", "signal", "user"] }
 procfs = { version = "0.16", default-features = false }
 sha1 = "0.10"
@@ -25,6 +26,7 @@ goblin = { version = "0.9", optional = true }
 
 [dev-dependencies]
 tower = "0.5"
+tempfile = "3.8"
 
 [features]
 default = []
