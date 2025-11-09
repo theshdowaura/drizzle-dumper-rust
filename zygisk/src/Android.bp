@@ -1,0 +1,18 @@
+cc_library_shared {
+    name: "libdrizzlezygisk",
+    srcs: ["module.cpp"],
+    cppflags: [
+        "-std=c++17",
+    ],
+    shared_libs: [
+        "liblog",
+        "libnlohmann_json",
+    ],
+    header_libs: [
+        "libnlohmann_json_headers",
+    ],
+    cflags: [
+        "-fvisibility=hidden",
+    ],
+    stl: "libc++",
+}

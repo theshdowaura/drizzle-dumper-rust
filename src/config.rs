@@ -38,6 +38,10 @@ pub struct FridaConfig {
     pub gadget_config_path: Option<PathBuf>,
     /// Reference an already prepared gadget deployment (MCP managed).
     pub gadget_id: Option<String>,
+    /// Seconds to wait for gadget listener readiness before failing.
+    pub gadget_ready_timeout: u64,
+    /// Milliseconds of inactivity before ending the FRIDA session.
+    pub quiet_after_complete_ms: u64,
 }
 
 impl Default for FridaConfig {
@@ -55,6 +59,8 @@ impl Default for FridaConfig {
             gadget_library_path: None,
             gadget_config_path: None,
             gadget_id: None,
+            gadget_ready_timeout: 10,
+            quiet_after_complete_ms: 3_000,
         }
     }
 }
@@ -75,6 +81,7 @@ pub struct Config {
     pub map_patterns: Vec<String>,
     pub dump_mode: DumpMode,
     pub frida: FridaConfig,
+    pub zygisk_enabled: bool,
 }
 
 impl Default for Config {
@@ -94,6 +101,7 @@ impl Default for Config {
             map_patterns: Vec::new(),
             dump_mode: DumpMode::Ptrace,
             frida: FridaConfig::default(),
+            zygisk_enabled: false,
         }
     }
 }

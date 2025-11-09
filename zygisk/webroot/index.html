@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Drizzle Zygisk 控制面板</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Drizzle Zygisk 控制面板</h1>
+      <p>选择需要在 Zygisk 阶段自动加载 Frida Gadget 的应用，并管理 drizzle-dumper MCP 服务。</p>
+    </header>
+
+    <main>
+      <section class="card">
+        <div class="card-header">
+          <h2>应用列表</h2>
+          <div class="toolbar">
+            <input id="search" type="search" placeholder="搜索包名…" />
+            <button id="refresh" type="button">刷新</button>
+          </div>
+        </div>
+        <div class="summary">
+          <span id="summary-text">加载中…</span>
+        </div>
+        <div id="package-list" class="package-list"></div>
+        <div class="bulk-actions">
+          <button id="select-all" type="button">全选</button>
+          <button id="select-none" type="button">全不选</button>
+          <button id="invert-selection" type="button">反选</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>MCP 服务配置</h2>
+        <label class="field">
+          <span>监听地址</span>
+          <input id="mcp-bind" type="text" placeholder="0.0.0.0:45831" />
+        </label>
+        <div class="actions">
+          <button id="save-config" type="button" class="primary">保存配置并重启 MCP</button>
+          <button id="restart-mcp" type="button">仅重启 MCP</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>即时操作</h2>
+        <div class="flex-row">
+          <label class="field flex-grow">
+            <span>包名</span>
+            <input id="manual-package" type="text" placeholder="com.example.app" />
+          </label>
+          <button id="trigger-dump" type="button">触发一次 dump</button>
+        </div>
+        <p class="hint">该操作会后台执行 <code>drizzle_dumper dump &lt;包名&gt; --zygisk</code>，输出日志保存在模块 run 目录。</p>
+      </section>
+
+      <section class="card">
+        <h2>状态</h2>
+        <pre id="status" class="status"></pre>
+      </section>
+    </main>
+
+    <footer>
+      <p>需要 Magisk 用户配合安装 <a href="https://magiskmodule.gitlab.io/blog/how-to-use-webui-modules-on-magisk/" target="_blank" rel="noopener">KSU WebUI</a> 才能显示此页面。</p>
+    </footer>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

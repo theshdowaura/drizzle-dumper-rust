@@ -26,9 +26,10 @@ mod inner {
     use std::collections::{hash_map::Entry, HashMap};
     use std::convert::TryFrom;
     use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::thread;
     use std::time::{Duration, Instant};
 
-    use anyhow::{anyhow, Context};
+    use anyhow::{anyhow, bail, Context};
     use frida::{
         Device, DeviceManager, DeviceType, Frida, Message, MessageSend, ScriptHandler,
         ScriptOption, SpawnOptions,
@@ -48,7 +49,8 @@ mod inner {
 
     const WAIT_FOR_AGENT_READY: Duration = Duration::from_secs(20);
     const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(250);
-    const QUIET_AFTER_COMPLETE: Duration = Duration::from_secs(3);
+    const THREAD_DISCOVERY_RETRIES: usize = 50;
+    const THREAD_DISCOVERY_INTERVAL: Duration = Duration::from_millis(50);
 
     enum GadgetContext {
         Managed(GadgetDeployment),
@@ -57,13 +59,17 @@ mod inner {
             config_path: Option<PathBuf>,
             port: u16,
         },
+        Zygisk {
+            port: u16,
+        },
     }
 
     impl GadgetContext {
-        fn library_path(&self) -> &Path {
+        fn library_path(&self) -> Option<&Path> {
             match self {
-                GadgetContext::Managed(dep) => dep.library_path.as_path(),
-                GadgetContext::External { library_path, .. } => library_path.as_path(),
+                GadgetContext::Managed(dep) => Some(dep.library_path.as_path()),
+                GadgetContext::External { library_path, .. } => Some(library_path.as_path()),
+                GadgetContext::Zygisk { .. } => None,
             }
         }
 
@@ -71,6 +77,7 @@ mod inner {
             match self {
                 GadgetContext::Managed(dep) => Some(dep.config_path.as_path()),
                 GadgetContext::External { config_path, .. } => config_path.as_deref(),
+                GadgetContext::Zygisk { .. } => None,
             }
         }
 
@@ -78,7 +85,12 @@ mod inner {
             match self {
                 GadgetContext::Managed(dep) => dep.port,
                 GadgetContext::External { port, .. } => *port,
+                GadgetContext::Zygisk { port } => *port,
             }
+        }
+
+        fn needs_injection(&self) -> bool {
+            !matches!(self, GadgetContext::Zygisk { .. })
         }
     }
 
@@ -86,7 +98,10 @@ mod inner {
         let frida_ctx = unsafe { Frida::obtain() };
         let manager = DeviceManager::obtain(&frida_ctx);
 
-        let gadget = if let Some(path) = cfg.frida.gadget_library_path.as_ref() {
+        let gadget = if cfg.zygisk_enabled {
+            let port = cfg.frida.gadget_port.unwrap_or(27_042);
+            Some(GadgetContext::Zygisk { port })
+        } else if let Some(path) = cfg.frida.gadget_library_path.as_ref() {
             let port = cfg
                 .frida
                 .gadget_port
@@ -102,22 +117,19 @@ mod inner {
             None
         };
 
-        if cfg.frida.spawn && gadget.is_some() {
-            println!("[*]  FRIDA gadget mode operates in attach mode; ignoring --frida-spawn");
-        }
-
-        let spawn_mode = cfg.frida.spawn && gadget.is_none();
-        let mut device_opt = if gadget.is_none() {
-            Some(select_device(&manager, cfg).context("select FRIDA device")?)
+        let spawn_mode = cfg.frida.spawn;
+        let mut spawn_device = if spawn_mode {
+            Some(select_device(&manager, cfg).context("select FRIDA device for spawn/resume")?)
         } else {
             None
         };
+
         let mut spawn_pid: Option<u32> = None;
         let target_pid = if spawn_mode {
             let options = SpawnOptions::default();
-            let dev = device_opt
+            let dev = spawn_device
                 .as_mut()
-                .expect("device selection must succeed for spawn mode");
+                .ok_or_else(|| anyhow!("spawn device unavailable"))?;
             let pid = dev
                 .spawn(package_name, &options)
                 .with_context(|| format!("spawn {package_name} via FRIDA"))?;
@@ -131,29 +143,41 @@ mod inner {
         let pid_i32 = i32::try_from(target_pid).unwrap_or(i32::MAX);
 
         if let Some(ctx) = gadget.as_ref() {
-            let tid = find_clone_thread(pid_i32)?
-                .ok_or_else(|| anyhow!("no thread found for gadget injection"))?;
-            let prev_env = std::env::var_os("FRIDA_GADGET_CONFIG");
-            if let Some(config) = ctx.config_path() {
-                std::env::set_var("FRIDA_GADGET_CONFIG", config);
-            }
-            inject_library(tid, ctx.library_path()).context("inject gadget library")?;
-            wait_for_gadget(ctx.port(), Duration::from_secs(10)).context("wait gadget listener")?;
-            match (ctx.config_path(), prev_env) {
-                (_, Some(prev)) => std::env::set_var("FRIDA_GADGET_CONFIG", prev),
-                (Some(_), None) => std::env::remove_var("FRIDA_GADGET_CONFIG"),
-                _ => {}
+            let gadget_wait = Duration::from_secs(cfg.frida.gadget_ready_timeout);
+            if ctx.needs_injection() {
+                let tid = wait_for_injectable_thread(pid_i32)
+                    .with_context(|| format!("locate thread for pid {pid_i32}"))?;
+                let prev_env = std::env::var_os("FRIDA_GADGET_CONFIG");
+                if let Some(config) = ctx.config_path() {
+                    std::env::set_var("FRIDA_GADGET_CONFIG", config);
+                }
+                if let Some(path) = ctx.library_path() {
+                    inject_library(tid, path).context("inject gadget library")?;
+                } else {
+                    bail!("gadget context missing library path");
+                }
+                wait_for_gadget(ctx.port(), gadget_wait).context("wait gadget listener")?;
+                match (ctx.config_path(), prev_env) {
+                    (_, Some(prev)) => std::env::set_var("FRIDA_GADGET_CONFIG", prev),
+                    (Some(_), None) => std::env::remove_var("FRIDA_GADGET_CONFIG"),
+                    _ => {}
+                }
+            } else {
+                println!(
+                    "[*]  Waiting for Zygisk gadget on port {} (timeout {}s)…",
+                    ctx.port(),
+                    cfg.frida.gadget_ready_timeout
+                );
+                wait_for_gadget(ctx.port(), gadget_wait).context("wait gadget listener")?;
             }
         }
 
-        let device = match (device_opt, gadget.as_ref()) {
-            (Some(existing), _) => existing,
-            (None, Some(ctx)) => manager
+        let device = if let Some(ctx) = gadget.as_ref() {
+            manager
                 .get_remote_device(&format!("127.0.0.1:{}", ctx.port()))
-                .context("connect gadget device")?,
-            (None, None) => {
-                select_device(&manager, cfg).context("select FRIDA device for attach")?
-            }
+                .context("connect gadget device")?
+        } else {
+            select_device(&manager, cfg).context("select FRIDA device for attach")?
         };
 
         let session = device
@@ -178,6 +202,12 @@ mod inner {
             .context("register script message handler")?;
         script.load().context("load FRIDA script")?;
 
+        let quiet_after = if cfg.frida.quiet_after_complete_ms == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(cfg.frida.quiet_after_complete_ms))
+        };
+
         let mut resume_pending = spawn_pid.is_some() && cfg.frida.resume_after_spawn;
         let mut aggregator = DexAggregator::new(package_name, cfg, pid_i32);
         let mut agent_ready = false;
@@ -193,7 +223,11 @@ mod inner {
                             agent_ready = true;
                             if resume_pending {
                                 if let Some(pid) = spawn_pid {
-                                    device.resume(pid).context("resume spawned process")?;
+                                    if let Some(spawner) = spawn_device.as_ref() {
+                                        spawner.resume(pid).context("resume spawned process")?;
+                                    } else {
+                                        device.resume(pid).context("resume spawned process")?;
+                                    }
                                 }
                                 resume_pending = false;
                             }
@@ -225,12 +259,12 @@ mod inner {
                     if !agent_ready && Instant::now() > ready_deadline {
                         bail!("FRIDA agent failed to report ready within allotted time");
                     }
-                    if agent_ready
-                        && aggregator.has_output()
-                        && aggregator.is_drained()
-                        && Instant::now().duration_since(last_event) > QUIET_AFTER_COMPLETE
-                    {
-                        break;
+                    if agent_ready && aggregator.has_output() && aggregator.is_drained() {
+                        if let Some(window) = quiet_after {
+                            if Instant::now().duration_since(last_event) > window {
+                                break;
+                            }
+                        }
                     }
                     continue;
                 }
@@ -241,6 +275,16 @@ mod inner {
         script.unload().ok();
         session.detach().ok();
         Ok(aggregator.into_outputs())
+    }
+
+    fn wait_for_injectable_thread(pid: i32) -> Result<i32> {
+        for _ in 0..THREAD_DISCOVERY_RETRIES {
+            if let Some(tid) = find_clone_thread(pid)? {
+                return Ok(tid);
+            }
+            thread::sleep(THREAD_DISCOVERY_INTERVAL);
+        }
+        bail!("no thread found for pid {pid} to inject gadget");
     }
 
     fn select_device<'a>(manager: &'a DeviceManager, cfg: &Config) -> Result<Device<'a>> {

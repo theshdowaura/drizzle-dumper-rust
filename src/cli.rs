@@ -144,6 +144,18 @@ pub struct DumpCommand {
     /// Reference an MCP-managed gadget deployment by identifier.
     #[arg(long = "frida-gadget-id", value_name = "ID")]
     pub frida_gadget_id: Option<String>,
+
+    /// Seconds to wait for gadget listener readiness.
+    #[arg(long = "frida-gadget-timeout", value_name = "SECONDS")]
+    pub frida_gadget_timeout: Option<u64>,
+
+    /// Milliseconds of silence before FRIDA session auto-exits.
+    #[arg(long = "frida-quiet-ms", value_name = "MILLIS")]
+    pub frida_quiet_ms: Option<u64>,
+
+    /// Indicate that a system-wide Zygisk module will load the gadget.
+    #[arg(long = "zygisk", action = ArgAction::SetTrue)]
+    pub zygisk: bool,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -202,6 +214,9 @@ impl DumpCommand {
         if self.frida_alias {
             dump_mode = DumpMode::Frida;
         }
+        if self.zygisk {
+            dump_mode = DumpMode::Frida;
+        }
         cfg.dump_mode = dump_mode;
 
         let mut frida_cfg = FridaConfig::default();
@@ -229,8 +244,15 @@ impl DumpCommand {
         frida_cfg.gadget_library_path = self.frida_gadget_path.clone();
         frida_cfg.gadget_config_path = self.frida_gadget_config.clone();
         frida_cfg.gadget_id = self.frida_gadget_id.clone();
+        if let Some(timeout) = self.frida_gadget_timeout {
+            frida_cfg.gadget_ready_timeout = timeout;
+        }
+        if let Some(quiet) = self.frida_quiet_ms {
+            frida_cfg.quiet_after_complete_ms = quiet;
+        }
 
         cfg.frida = frida_cfg;
+        cfg.zygisk_enabled = self.zygisk;
         cfg
     }
 }
@@ -291,6 +313,7 @@ mod tests {
         assert!(cfg.watch_maps);
         assert_eq!(cfg.stage_threshold, Some(3));
         assert_eq!(cfg.map_patterns, vec!["classes.dex".to_string()]);
+        assert!(!cfg.zygisk_enabled);
     }
 
     #[test]
@@ -318,6 +341,10 @@ mod tests {
             "/tmp/gadget.json",
             "--frida-gadget-id",
             "demo-id",
+            "--frida-gadget-timeout",
+            "15",
+            "--frida-quiet-ms",
+            "5000",
         ]);
 
         assert_eq!(cmd.wait, None);
@@ -340,11 +367,21 @@ mod tests {
             Some(PathBuf::from("/tmp/gadget.json"))
         );
         assert_eq!(cfg.frida.gadget_id.as_deref(), Some("demo-id"));
+        assert_eq!(cfg.frida.gadget_ready_timeout, 15);
+        assert_eq!(cfg.frida.quiet_after_complete_ms, 5000);
+        assert!(!cfg.zygisk_enabled);
     }
 
     #[test]
     fn frida_alias_switches_mode() {
         let (_, cfg) = parse_dump(&["com.example.app", "--frida"]);
+        assert_eq!(cfg.dump_mode, DumpMode::Frida);
+    }
+
+    #[test]
+    fn zygisk_flag_sets_config() {
+        let (_, cfg) = parse_dump(&["com.example.app", "--zygisk"]);
+        assert!(cfg.zygisk_enabled);
         assert_eq!(cfg.dump_mode, DumpMode::Frida);
     }
 }

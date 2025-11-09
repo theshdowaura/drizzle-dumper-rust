@@ -1,0 +1,127 @@
+name: zygisk-module-build
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - "v*.*.*"
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  ANDROID_API_LEVEL: 29
+  FRIDA_VERSION: 16.1.4
+
+jobs:
+  build-zygisk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: false
+
+      - name: Configure cross-compilation env
+        run: |
+          set -euo pipefail
+          ndk="${{ steps.setup-ndk.outputs.ndk-path }}"
+          target_api="${ANDROID_API_LEVEL:-29}"
+          sysroot="$ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          toolchain_bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ndk" >> "$GITHUB_ENV"
+          echo "NDK_SYSROOT=$sysroot" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=${toolchain_bin}/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=${toolchain_bin}/llvm-ar" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=${toolchain_bin}/aarch64-linux-android${target_api}-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${toolchain_bin}/aarch64-linux-android${target_api}-clang" >> "$GITHUB_ENV"
+
+          BCA_ARGS="--target=aarch64-linux-android${target_api} --sysroot=$sysroot -I$sysroot/usr/include -I$sysroot/usr/include/aarch64-linux-android -D__ANDROID_API__=${target_api}"
+          echo "BCA_ARGS=$BCA_ARGS" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=$BCA_ARGS" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android=$BCA_ARGS" >> "$GITHUB_ENV"
+
+      - name: Download FRIDA core devkit
+        run: |
+          set -euo pipefail
+          curl -L "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-core-devkit-${FRIDA_VERSION}-android-arm64.tar.xz" -o frida-devkit.tar.xz
+          mkdir -p "$GITHUB_WORKSPACE/frida-devkit"
+          tar -xJf frida-devkit.tar.xz -C "$GITHUB_WORKSPACE/frida-devkit" --strip-components=1
+          rm frida-devkit.tar.xz
+          echo "FRIDA_CORE_DEVKIT=$GITHUB_WORKSPACE/frida-devkit" >> "$GITHUB_ENV"
+          if [ -d "$GITHUB_WORKSPACE/frida-devkit/lib/pkgconfig" ]; then
+            echo "PKG_CONFIG_PATH=$GITHUB_WORKSPACE/frida-devkit/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          fi
+          if [ -d "$GITHUB_WORKSPACE/frida-devkit/include" ]; then
+            EXTRA_ARGS="${BCA_ARGS:-} -I$GITHUB_WORKSPACE/frida-devkit/include"
+            echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=$EXTRA_ARGS" >> "$GITHUB_ENV"
+            echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64-linux-android=$EXTRA_ARGS" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build drizzle_dumper (aarch64)
+        run: cargo build --release --target aarch64-linux-android --features frida
+
+      - name: Configure CMake build
+        run: |
+          set -euo pipefail
+          ndk_root="${{ steps.setup-ndk.outputs.ndk-path }}"
+          abi="arm64-v8a"
+          platform="android-${ANDROID_API_LEVEL}"
+          cmake -S zygisk/src -B build/zygisk \
+            -DANDROID_NDK="$ndk_root" \
+            -DCMAKE_TOOLCHAIN_FILE="$ndk_root/build/cmake/android.toolchain.cmake" \
+            -DANDROID_PLATFORM="$platform" \
+            -DANDROID_ABI="$abi" \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build Zygisk shared object
+        run: |
+          set -euo pipefail
+          cmake --build build/zygisk --target drizzlezygisk --config Release
+
+      - name: Package Magisk module
+        run: |
+          set -euo pipefail
+          MODULE_ROOT=dist/zygisk-module
+          mkdir -p "$MODULE_ROOT/libs/arm64-v8a"
+          mkdir -p "$MODULE_ROOT/config"
+          mkdir -p "$MODULE_ROOT/bin"
+          mkdir -p "$MODULE_ROOT/webroot"
+
+          cp zygisk/module.prop "$MODULE_ROOT/"
+          cp zygisk/service.sh "$MODULE_ROOT/"
+          cp zygisk/sepolicy.rule "$MODULE_ROOT/"
+          cp -r zygisk/config/* "$MODULE_ROOT/config/"
+          cp build/zygisk/libdrizzlezygisk.so "$MODULE_ROOT/libs/arm64-v8a/"
+          cp target/aarch64-linux-android/release/drizzle_dumper "$MODULE_ROOT/bin/drizzle_dumper"
+          chmod 0755 "$MODULE_ROOT/bin/drizzle_dumper"
+          cp -r zygisk/webroot/* "$MODULE_ROOT/webroot/"
+
+          (cd "$MODULE_ROOT" && zip -r ../drizzle-zygisk-module.zip .)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: drizzle-zygisk-module
+          path: dist/drizzle-zygisk-module.zip
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/drizzle-zygisk-module.zip

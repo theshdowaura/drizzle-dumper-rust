@@ -1170,13 +1170,23 @@ fn config_from_args(arguments: &HashMap<String, Value>) -> Result<Config, McpErr
     if let Some(id) = arguments.get("frida_gadget_id") {
         cfg.frida.gadget_id = Some(as_string("frida_gadget_id", id)?);
     }
+    if let Some(timeout) = arguments.get("frida_gadget_timeout") {
+        cfg.frida.gadget_ready_timeout = as_u64("frida_gadget_timeout", timeout)?;
+    }
+    if let Some(quiet) = arguments.get("frida_quiet_ms") {
+        cfg.frida.quiet_after_complete_ms = as_u64("frida_quiet_ms", quiet)?;
+    }
+    if let Some(zygisk) = arguments.get("zygisk") {
+        cfg.zygisk_enabled = as_bool("zygisk", zygisk)?;
+    }
 
     let implicit_frida = cfg.frida.remote.is_some()
         || cfg.frida.use_usb
         || cfg.frida.script_path.is_some()
         || cfg.frida.gadget_enabled
         || !cfg.frida.spawn
-        || !cfg.frida.resume_after_spawn;
+        || !cfg.frida.resume_after_spawn
+        || cfg.zygisk_enabled;
     if implicit_frida && cfg.dump_mode != DumpMode::Frida {
         cfg.dump_mode = DumpMode::Frida;
     }
@@ -1288,6 +1298,18 @@ fn dump_tool_schema(include_frida: bool) -> Value {
         properties.insert(
             "frida_gadget_id".into(),
             json!({"type": "string", "description": "复用 `prepare_frida_gadget` 产生的 deployment_id，跳过文件重新生成。"}),
+        );
+        properties.insert(
+            "zygisk".into(),
+            json!({"type": "boolean", "description": "启用系统级 Zygisk 常驻注入，跳过 ptrace 注入并仅连接到已加载的 Gadget。"}),
+        );
+        properties.insert(
+            "frida_gadget_timeout".into(),
+            json!({"type": "integer", "minimum": 0, "description": "等待 Gadget 监听端口就绪的秒数，默认 10；设为 0 立即失败。"}),
+        );
+        properties.insert(
+            "frida_quiet_ms".into(),
+            json!({"type": "integer", "minimum": 0, "description": "FRIDA 模式在收到最后一个 Dex 事件后继续等待的毫秒数；设为 0 表示不自动退出。"}),
         );
     }
 
@@ -1795,6 +1817,9 @@ mod tests {
             "frida_gadget_config".to_string(),
             json!("/tmp/gadget.config"),
         );
+        args.insert("frida_gadget_timeout".to_string(), json!(15));
+        args.insert("frida_quiet_ms".to_string(), json!(5000));
+        args.insert("zygisk".to_string(), json!(true));
 
         let cfg = config_from_args(&args).expect("parse config");
         assert_eq!(cfg.dump_mode, DumpMode::Frida);
@@ -1815,6 +1840,10 @@ mod tests {
             cfg.frida.gadget_config_path,
             Some(PathBuf::from("/tmp/gadget.config"))
         );
+        assert_eq!(cfg.frida.gadget_ready_timeout, 15);
+        assert_eq!(cfg.frida.quiet_after_complete_ms, 5000);
+        assert!(cfg.zygisk_enabled);
+        assert_eq!(cfg.dump_mode, DumpMode::Frida);
     }
 
     struct DummyTool {
